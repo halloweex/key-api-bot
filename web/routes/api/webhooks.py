@@ -10,6 +10,7 @@ import os
 from collections import Counter
 from datetime import datetime
 from typing import Any, Dict
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request, HTTPException
 from starlette.requests import ClientDisconnect
@@ -21,17 +22,25 @@ from ._deps import limiter, get_store
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
 
-# TurboSMS timestamps arrive as Kyiv local time in this shape.
+# TurboSMS timestamps arrive as Kyiv local time in this shape, with no offset.
 _DLR_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_DLR_TIME_ZONE = ZoneInfo("Europe/Kyiv")
 
 
 def _parse_dlr_time(value: Any) -> datetime | None:
+    """The instant the gateway's `dlr_date` names, as an aware datetime.
+
+    The zone is the gateway's and is attached here. A naive time was stored
+    by asyncpg in the process's own zone: right in the web container, which
+    runs TZ=Europe/Kyiv, and three hours late under UTC.
+    """
     if not value:
         return None
     try:
-        return datetime.strptime(str(value), _DLR_TIME_FORMAT)
+        parsed = datetime.strptime(str(value), _DLR_TIME_FORMAT)
     except ValueError:
         return None
+    return parsed.replace(tzinfo=_DLR_TIME_ZONE)
 
 
 # A send of N recipients produces up to N delivery reports, ~98% of them inside

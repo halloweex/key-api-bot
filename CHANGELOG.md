@@ -2,6 +2,86 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.368
+
+- docs: comments name what holds their rule since batch 2
+- fix(forecast): the model's evaluation and tuning refuse a failed read
+- fix(sms): a delivery report's time is the Kyiv instant the gateway named
+- docs: the test baseline on main with #383, after batch 2
+- docs: the test baseline on main with #405, after batch 2
+- docs: the test baseline on main with #403–#408, after batch 2
+- tests: batch 2 on top of #403/#404 — the two new SMS routes in the matrix, batches by the client's size
+- docs: the test baseline after batch 2, and three references to tests it replaced
+- tests: batch 2 — docstrings name the tests that replaced the deleted walkers
+- tests: batch 2, expenses-routers — item 30: one behavioural sweep for the 503, the walks gone
+- tests: batch 2, derivation — items 1, 5: assert the journalled failure, not its wording
+- tests: batch 2, derivation — item 7: the /inventory status rebuild's rules over Postgres
+- tests: batch 2, traffic — item 67: the dry run's fallback held to the tab's SQL in Postgres
+- tests: batch 2, orders — item 12: the backdated order's status, written for real
+- tests: batch 2, derivation — item 6: a failed Silver rebuild keeps the previous rows, on a real server
+- tests: batch 2, orders — item 9: the row-values twin agrees with the rebuild
+- tests: batch 2, expenses-routers — item 29: the traffic report goes out from a working Postgres
+- tests: batch 2, traffic — item 66: a UTM parse fault is not the derivation's, over Postgres
+- tests: batch 2, derivation — items 4, 5: the restart floor and the run's tail over Postgres
+- tests: batch 2, orders — item 11: every KeyCRM status known, over Postgres
+- tests: batch 2, expenses-routers — item 28: the search index's cursor, run for real
+- tests: batch 2, traffic — items 63, 64, 65: the UTM doors over Postgres
+- tests: batch 2, orders — item 10: the circuit breaker, one test on the real one
+- tests: batch 2, derivation — item 3: /api/health's derivation block from a real meta.mirror_state row
+- tests: batch 2, orders — item 8: force_resync in place, through the admin's door
+- tests: batch 2, expenses-routers — item 26: momentum counts only sales, on Postgres
+- tests: batch 2, expenses-routers — item 25: the expenses history gate through the routes
+- tests: batch 2, derivation — items 1, 2: the warehouse levers and the status page over Postgres
+- tests: batch 2, traffic — item 62: the weekly traffic report counts the tab's retail, over Postgres
+- tests: batch 2, expenses-routers — item 24: the expenses list and its sum over Postgres
+- tests: batch 2, sms-send — items 55, 56: the test send and the opt-out over Postgres
+- tests: batch 2, sms-send — items 53, 54: the CSV freeze and the results over Postgres
+- tests: batch 2, sms-send — items 50, 51, 52: the audience preview over Postgres
+- tests: batch 2, access — item 35: mark the queue's Postgres tests one by one
+- tests: batch 2, buyers — item 21: the race test waits for the writer before cleanup on a failure
+- tests: batch 2, access — item 41: the boot sync's window, with KeyCRM faked at the transport
+- tests: batch 2, buyers — item 18: the full buyer sync against Postgres with KeyCRM faked at the transport
+- tests: batch 2, sms-send — item 49: one permission matrix over every SMS route
+- tests: batch 2, buyers — items 16, 17: the gender preview's read-only read and the --all write path on Postgres
+- tests: batch 2, sms-audience — item 27: a SKU on two offers, costed once in the SMS audience and results
+- tests: batch 2, access — items 39, 40: the permission PATCH and web's start, by what they write
+- tests: batch 2, sms-audience — item 60: the gender filter selects by the verdicts in Postgres
+- tests: batch 2, buyers — items 19, 20, 21: managers chain refusals, signal and race on Postgres
+- tests: batch 2, access — items 37, 38: concurrent refusals and the session's list, over Postgres
+- tests: batch 2, sms-send — item 59: the DLR time read back from Postgres as an instant
+- tests: batch 2, sms-audience — items 46-48: audience groups through the routes on Postgres
+- tests: batch 2, access — items 34, 35, 36: tab gates by answers, the access-request queue and the tab column over Postgres
+- tests: batch 2, sms-send — item 61: the DLR binding race, run on a Postgres pool
+- tests: batch 2, sms-audience — items 42-45: the audience routes on Postgres
+- tests: batch 2, buyers — items 13, 14, 15: the managers screen over Postgres, no-date classification, trigger-injected failure
+- tests: batch 2, sms-send — items 57, 58: gateway failures and claim hand-backs over Postgres
+- tests: batch 2, access — items 32, 33: admin user writes read back from Postgres; rate limits by what they do
+- tests: batch 2, buyers — items 22, 23: buyer NUMERIC bounds and verdict CHECKs against the migrated schema
+- tests: batch 2, access — item 31: /api/me writes and reads only the session's own row, over Postgres
+
+
+## 3.0.367
+
+- rust: the access contract names the live stock margin route (#406)
+- deploy/rust: the role's password comes from the environment, never argv
+- rust: the access contract names the two SMS send routes (#404)
+- rust: the pilot's watch is a line in the 09:00 digest, never a page
+- rust: step 2's guards — Vary, the watchdog, the drift sensor, its own role
+- nginx: a route switched to Rust keeps /api/'s expires -1
+- rust: the access contract at 0039_promotions
+- feat(rust): the trend answers the offline store (#387)
+- chore(rust): the access contract requires 0036_analytics_captures
+- feat(rust): the trend draws the stored forecast and the whole period's comparison
+- WIP: the trend alone in the harnesses; its frontend contract; access for 3.0.345
+- WIP: the Rust trend reads period=all_time and granularity=monthly
+- WIP: narrow Rust trend branch cut from main (not built, not verified)
+
+
+## 3.0.366
+
+- feat(scheduler): who executes each job, and a lease that keeps it to one process
+
+
 ## 3.0.365
 
 - fix(dashboard): every block follows the header's filters; one expense total

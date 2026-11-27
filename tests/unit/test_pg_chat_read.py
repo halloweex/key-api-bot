@@ -1,7 +1,7 @@
 """The chat tools' one door — the structure a two-engine test cannot see.
 
 Since step 14's S14-07 `_chat_run` reads Postgres alone and `KS_READ_CHAT`
-chooses nothing (`tests/unit/test_tab_routers_postgres_only.py`); the tests
+chooses nothing; the tests
 of that switch — its default, a typo raising — went with it."""
 from __future__ import annotations
 

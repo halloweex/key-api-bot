@@ -13,7 +13,9 @@ this one would have inherited the same hole.
 
 So every entry point that can reach a landing writer calls `configure_modes()`
 first: web's startup, before the boot sync; the scheduler, again, which is
-harmless; and the scripts that reach `write_orders`. A test walks all three.
+harmless; and the scripts that reach `write_orders`. The test that walked all
+three went with the step-14 tombstones (#390); that the call loads the latch
+is held by `tests/unit/test_chain_latch.py`.
 
 **A later cached mode is added here, and nowhere else.** The entry points know
 this function, not the modes behind it, so none of them has to learn about a

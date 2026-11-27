@@ -1,8 +1,8 @@
 """The `/marketing` statements, and the two shapes that had to be bridged.
 
 The numbers are `tests/integration/test_marketing_two_engines.py`'s job,
-against a real Postgres; that the router asks Postgres and nothing else since
-step 14's S14-05 is `tests/unit/test_read_routers_postgres_only.py`'s. What
+against a real Postgres; that a failure of its engine is refused naming its surface is
+the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s. What
 is proved here is the statements and the two places where this port is not a
 table rename:
 

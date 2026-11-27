@@ -118,16 +118,10 @@ class TestTheSilverRule:
         assert silver_select_sql(POSTGRES) == before
         assert "buyer_id NOT IN" not in before
 
-    def test_every_rendering_that_derives_silver_carries_it(self):
-        """The rebuild's statement and the row-values recompute say the rule
-        in one text: a twin recomputing the old rule would call every
-        own-entity row stale for ever."""
-        from core import pg_silver, pg_warehouse_dq
-        from core.warehouse_sql import silver_recompute_ctes
-
-        for sql in (pg_silver.insert_sql(), silver_recompute_ctes(POSTGRES),
-                    pg_warehouse_dq._row_values_sql()):
-            assert sql.count(f"AND {CLAUSE} AS is_active_source") == 1
+    # That the row-values twin recomputes the rule the rebuild applied — or it
+    # would call every own-entity row stale for ever — is held over a real
+    # Postgres: `tests/integration/test_own_entity_not_revenue.py::
+    # TestTheFindings::test_the_row_values_twin_recomputes_the_rule_the_rebuild_applied`.
 
     def test_gold_reads_the_column_never_the_rule(self):
         """Every Gold measure, in Postgres and ClickHouse, follows

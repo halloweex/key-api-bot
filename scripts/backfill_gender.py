@@ -97,9 +97,10 @@ async def preview() -> int:
 async def run(rebuild_all: bool) -> int:
     from core.runtime_modes import configure_modes
 
-    # Before the first write, as every script that writes does
-    # (`tests/unit/test_runtime_modes.py`): the modes a write reads are
-    # configured here, the latch markers among them.
+    # Before the first write, as every script that writes does: the modes a
+    # write reads are configured here, the latch markers among them
+    # (`core/runtime_modes.py`; that the call loads the latch is held by
+    # `tests/unit/test_chain_latch.py`).
     configure_modes()
     result = await pg_buyers_write.derive_gender_pg(rebuild_all=rebuild_all)
     if result["error"]:

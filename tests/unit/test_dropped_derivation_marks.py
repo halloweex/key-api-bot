@@ -2,11 +2,13 @@
 
 `mark` records a drop in `meta.mirror_state` and nothing used to write that row
 again, so one lock timeout read as failing for ever. What is here: the heal is
-asked for only after a validated rebuild, `/api/health` publishes the count, and
-the canary pages only where healing is demonstrably not happening — the latest
-drop older than a heartbeat's rebuild, or marks failing ten times in a row —
-judged from one probe with no memory between probes. The heal's SQL against
-a real server is in `tests/integration/test_pg_own_derivation.py`.
+asked for only after a validated rebuild, and the canary pages only where
+healing is demonstrably not happening — the latest drop older than a
+heartbeat's rebuild, or marks failing ten times in a row — judged from one
+probe with no memory between probes. The heal's SQL against a real server is
+in `tests/integration/test_pg_own_derivation.py`; `/api/health` publishing the
+count and the age from a real row, in
+`tests/integration/test_health_derivation_block.py`.
 """
 from __future__ import annotations
 
@@ -23,14 +25,6 @@ from bot import canary
 from core import pg_derivation
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-
-
-@pytest.fixture
-def mode():
-    """The cached KS_PG_DERIVE mode's setter until step 14's S14-15 removed
-    the mode; kept as a fixture that sets nothing, so a test still says it
-    was written for `own` — the only state there is."""
-    return lambda _value: None
 
 
 class _Conn:
@@ -164,60 +158,6 @@ class TestTheHealItself:
         conn = _Conn(error=ConnectionError("gone"))
         assert asyncio.run(pg_derivation.heal_dropped_marks(
             conn, datetime.now(timezone.utc))) is False
-
-
-# ─── /api/health publishes the count and the age of the latest drop ────────
-
-class TestHealthPublishesTheDrops:
-    def _read(self, conn=None, pool_error=None):
-        from web.routes.api import health
-
-        health._marks_cache.update(data=None, expires_at=0)
-        get_pool = (AsyncMock(side_effect=pool_error) if pool_error
-                    else AsyncMock(return_value=_Pool(conn)))
-        try:
-            with patch("core.pg.get_pool", get_pool):
-                return asyncio.run(health._derivation_block()), get_pool
-        finally:
-            health._marks_cache.update(data=None, expires_at=0)
-
-    def test_under_own_it_reads_the_count_and_ages_the_latest_drop(self, mode):
-        mode("own")
-        dropped = datetime.now(timezone.utc) - timedelta(minutes=80)
-        conn = _Conn(row={"failures_since_ok": 3, "last_attempted_at": dropped})
-        block, _ = self._read(conn)
-        assert set(block) == {"signal_unreadable_ticks",
-                              "marks_dropped_unhealed", "last_mark_drop_age_s"}
-        assert block["marks_dropped_unhealed"] == 3
-        assert 80 * 60 <= block["last_mark_drop_age_s"] <= 80 * 60 + 5
-        assert conn.calls[0][1] == (pg_derivation.SIGNAL_TABLE,)
-
-    def test_a_healed_row_has_no_age(self, mode):
-        """A heal moves `last_attempted_at` too; read as a drop, it would age
-        into a page an hour after every heal."""
-        mode("own")
-        healed = datetime.now(timezone.utc) - timedelta(hours=5)
-        block, _ = self._read(_Conn(row={"failures_since_ok": 0, "last_attempted_at": healed}))
-        assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (0, None)
-
-    def test_a_signal_that_never_dropped_a_mark_has_no_row_and_reads_zero(self, mode):
-        mode("own")
-        block, _ = self._read(_Conn(row=None))
-        assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (0, None)
-
-    def test_unreadable_is_null_not_zero(self, mode):
-        mode("own")
-        block, _ = self._read(pool_error=RuntimeError("no dsn"))
-        assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (None, None)
-
-    def test_the_endpoint_carries_the_block(self):
-        tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))
-        handler = next(n for n in ast.walk(tree)
-                       if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check")
-        awaited = {n.value.func.id for n in ast.walk(handler)
-                   if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
-                   and isinstance(n.value.func, ast.Name)}
-        assert "_derivation_block" in awaited
 
 
 # ─── The canary: only where healing is demonstrably not happening ──────────

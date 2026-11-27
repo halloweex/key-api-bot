@@ -1,9 +1,8 @@
 """The filter bar's statements, and what reaches Postgres.
 
 The numbers are `tests/integration/test_lookups_two_engines.py`'s job, against
-a real Postgres; that the router asks Postgres and nothing else since step
-14's S14-05 — whatever `KS_READ_LOOKUPS` says, and a failure refused naming
-`lookups` — is `tests/unit/test_read_routers_postgres_only.py`'s. Here:
+a real Postgres; that a failure of its engine is refused naming `lookups` is
+the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s. Here:
 
   * every one of the four sends its statements to Postgres, on a store whose
     DuckDB connection is a trap;

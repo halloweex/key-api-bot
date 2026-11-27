@@ -11,9 +11,11 @@ would be deciding from a list that no longer changes (chain 7a's rule,
 `pg_goals_write.reads_the_chain`). A Postgres failure raises, so the page
 fails where it can be seen.
 
-No handler here on purpose: `tests/unit/test_read_fallback_sites.py` walks
-every handler in `core/pg_*_read*.py`, and this module has nothing to fall
-back to.
+No handler here on purpose: this module has nothing to fall back to, so a
+failure goes to the route as it is, a 500. The refusal test names that 500
+(`CHAIN_FIRST` in `tests/unit/test_read_fallback_http.py`), and its route
+sweep (`TestEveryRoute`) reads what every GET route answers with Postgres
+down. The sweep replaced the walk of every handler in `core/pg_*_read*.py`.
 """
 from __future__ import annotations
 

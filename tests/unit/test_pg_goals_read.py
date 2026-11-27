@@ -1,7 +1,7 @@
 """The `/goals` statements, and — mostly — what the router may not touch.
 
 ONE ENGINE SINCE STEP 14 (S14-07). `_goals_run` and `_goal_tables_run` read
-Postgres and refuse any failure (`tests/unit/test_tab_routers_postgres_only.py`);
+Postgres and refuse any failure (the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`));
 `KS_READ_GOALS` is not read. Until then this file held that flag — its
 default, a typo stopping every read — the DuckDB path, every routed method on
 an empty DuckDB, and the boundary that kept the three shared goal tables off

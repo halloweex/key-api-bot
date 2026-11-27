@@ -1165,6 +1165,10 @@ class TestTheLineItemTwinsThroughTheJob:
 # one more of its kind and nothing else moved, a clean row is nothing at all.
 
 LANDING = list(range(981001, 981060))
+# Every status KeyCRM serves: the nine measured against the live API on
+# 2026-08-09 (one real order each) and the seven the known list lacked until
+# then (3, 4, 8, 10, 11, 18, 24).
+KEYCRM_STATUSES = (1, 3, 4, 8, 9, 10, 11, 12, 15, 18, 19, 20, 21, 22, 23, 24)
 
 
 @pytest_asyncio.fixture
@@ -1242,6 +1246,19 @@ class TestTheLandingTwins:
             await _order(conn, LANDING[5], status=22, group=None)
         after = await _landing_facts(landing)
         assert after.order_landing == before.order_landing
+
+    @pytest.mark.asyncio
+    async def test_every_status_keycrm_serves_adds_nothing(self, landing):
+        """One order in each status KeyCRM serves, returns included: none is
+        counted against the status domain, and no other landing check moves.
+        Before 2026-08-09 an ordinary parcel awaiting pickup (24) was read as
+        an unknown status."""
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            for oid, status in zip(LANDING, KEYCRM_STATUSES):
+                await _order(conn, oid, status=status)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {}
 
     @pytest.mark.asyncio
     async def test_an_order_without_line_items_warns_and_the_one_in_flight_does_not(self, landing):

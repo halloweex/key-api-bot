@@ -49,14 +49,22 @@ from core.data_quality import IntegrityIssue, Severity
 
 logger = logging.getLogger(__name__)
 
-# The last below-watermark heal this process performed, read by
-# reconcile_ch_history — the buyers mirror's rule applied to its own sibling:
-# a repair the daily check never gets to see must leave a trace in the
-# findings, not only in a log line. Process-local, same caveat, same reason.
+# The last below-watermark heal this process knows of, read by
+# reconcile_ch_history and the alerts' machine note — the buyers mirror's rule
+# applied to its own sibling: a repair the daily check never gets to see must
+# leave a trace in the findings, not only in a log line. Written here when
+# this process heals, and refreshed from HEAL_ROW by the daily comparison, so
+# a heal made by another process is seen too.
 last_heal: Dict[str, Any] = {}
 
 DB_ENV = "KS_CH_HISTORY_DB"
 STATE_ROW = "clickhouse.order_versions"
+# The heal's durable trace, in meta.mirror_state: `last_ok_at` is when,
+# `last_rows` how many versions were re-shipped below the copy's watermark.
+# Whoever ships the archive stamps it — this process, or the Rust worker once
+# `executor:ch_sync` names Rust (the Rust plan, К0 and К1), whose memory the
+# daily check cannot read. A process restart no longer loses the trace either.
+HEAL_ROW = STATE_ROW + ".heal"
 
 COLUMNS: Tuple[str, ...] = (
     "id", "order_id", "captured_at", "kind",
@@ -172,6 +180,7 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
                 "watermark — rows the copy had lost", healed,
             )
             last_heal.update(at=datetime.now(timezone.utc), shipped=healed)
+            await _stamp_heal(healed)
         elif shipped:
             logger.info("ch_history: appended %d version(s)", shipped)
         return {"appended": shipped}
@@ -180,6 +189,26 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
         logger.error("ch_history: ship failed: %s", detail)
         await _mark_failed(STATE_ROW, detail)
         return {"error": detail}
+
+
+async def _stamp_heal(healed: int) -> None:
+    """The heal's durable trace. Never raises: the ship succeeded, and a trace
+    that could not be written costs the trace, not the archive's state row."""
+    try:
+        await _mark_ok(HEAL_ROW, healed)
+    except Exception as e:  # noqa: BLE001 — logged, the ship already stands
+        logger.warning("ch_history: could not record the heal in %s: %s", HEAL_ROW, e)
+
+
+def _refresh_heal(row) -> None:
+    """Take the durable trace into `last_heal` when it is newer than what this
+    process knows — a heal another process made reaches the finding below and
+    the alerts' machine note (`data_quality.machine_attempts_note`)."""
+    if row is None or row["last_ok_at"] is None:
+        return
+    at = row["last_ok_at"]
+    if last_heal.get("at") is None or at > last_heal["at"]:
+        last_heal.update(at=at, shipped=int(row["last_rows"] or 0))
 
 
 # What only the comparison below re-examines. `ch_history_buckets` resolves
@@ -302,6 +331,11 @@ async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]
             "WHERE table_name = $1",
             STATE_ROW,
         )
+        heal = await conn.fetchrow(
+            "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1",
+            HEAL_ROW,
+        )
+    _refresh_heal(heal)
     pg_buckets = {int(r[0]): int(r[1]) for r in records}
 
     issues: List[IntegrityIssue] = []

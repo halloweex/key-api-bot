@@ -22,7 +22,7 @@ import pytest
 
 from core import pg_derivation
 from tests.helpers.derivation import (  # noqa: F401
-    _Pool, _bounded, _derive, _verdict, job, mode,
+    _Pool, _bounded, _derive, job, mode,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -412,24 +412,6 @@ class TestAReadThatNeverReturns:
         assert results == [{"skipped": True, "reason": "signal unreadable: the query's own"}]
 
 
-class TestHealthPublishesTheCount:
-    def test_under_own_it_is_the_process_count(self, job):
-        from web.routes.api.health import _signal_reads
-
-        assert _signal_reads() == {"signal_unreadable_ticks": 0}
-        pg_derivation.note_signal_unreadable()
-        pg_derivation.note_signal_unreadable()
-        assert _signal_reads() == {"signal_unreadable_ticks": 2}
-
-    def test_the_block_carries_it(self):
-        tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))
-        block = next(n for n in ast.walk(tree)
-                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "_derivation_block")
-        called = {n.func.id for n in ast.walk(block)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "_signal_reads" in called
-
-
 def _recorded(mocks):
     return [c.args[0] for c in mocks["record_failure"].await_args_list]
 
@@ -453,13 +435,6 @@ class TestTheFloorOutlivesAnUnwritableJournal:
         before = datetime.now(timezone.utc)
         _derive(job)
         assert before <= BackgroundScheduler._pg_derive_started <= datetime.now(timezone.utc)
-
-    def test_the_journal_still_carries_the_floor_across_a_restart(self, job):
-        """A new process has no stamp of its own; the journal is what keeps a
-        deploy from resetting the floor."""
-        recent = datetime.now(timezone.utc) - timedelta(minutes=2)
-        result, _m = _derive(job, journal_attempt=recent)
-        assert result == {"skipped": True, "reason": "floor"}
 
     def test_an_older_journal_row_does_not_undercut_this_process(self, job):
         """Production's journal is never empty (RUNS_KEPT is 20 000). A row
@@ -500,24 +475,10 @@ class TestEveryStageIsRecorded:
         _r, mocks = _derive(job, raising=(step,))
         assert _recorded(mocks) == [table]
 
-    def test_the_read_inside_the_lock_is_not_recorded_on_the_signal(self, job):
-        """The signal's row counts dropped marks, and the canary pages on it by
-        that name; the journal row and the alert carry this failure."""
-        result, mocks = _derive(job, reads=((3, 2, None), RuntimeError("read")))
-        assert result["stage"] == "signal"
-        assert _recorded(mocks) == []
-
     def test_a_completed_run_clears_the_tail(self, job):
         result, mocks = _derive(job)
         assert result["status"] == "success"
         assert mocks["clear_tail"].await_count == 1 and _recorded(mocks) == []
-
-    def test_a_run_that_fails_validation_still_clears_it(self, job):
-        """Not passed is a finding, journaled and alerted as `validation_failed`;
-        the tail itself completed."""
-        result, mocks = _derive(job, verdict=_verdict(passed=False))
-        assert result["validation_passed"] is False
-        assert mocks["clear_tail"].await_count == 1
 
 
 class _Conn:

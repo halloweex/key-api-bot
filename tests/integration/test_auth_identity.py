@@ -21,6 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from web.main import app
+from tests.helpers.access_lists import bot_store_on_postgres, execute, rows
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_sms_seed import needs_postgres
 
 # Obviously fake, and shaped like the real thing (digits, colon, secret).
 FAKE_BOT_TOKEN = "123456:AAH-fake-token-for-tests-only-not-real"
@@ -544,43 +547,31 @@ class TestCallbackRedirectIsNotCallerControlled:
         assert not location.startswith("//"), f"protocol-relative redirect: {location}"
 
 
+@needs_postgres
 class TestMeTouchesOnlyTheSessionsOwnRow:
     """`/api/me` and `PATCH /api/me/preferences` take no identifier at all —
-    the user id comes from the signed cookie, and `write_language` binds it.
+    the user id comes from the signed cookie.
 
     An IDOR pass judged these endpoints exempt on that reading. What makes the
     judgement worth a test is how easily it stops being true: a `user_id`
     parameter added here so an admin can fix somebody's language would turn the
     one endpoint every approved user may write through into a way to write
     everyone's row, and nothing else in the file would notice.
+
+    Over the test Postgres, with the bot's store there as production runs it
+    (`KS_BOT_STORE=postgres`): a language lives in `app.user_preferences`, so
+    what is asserted is whose row holds it.
     """
 
-    ORDINARY_ID = 555_000_666
-    SOMEONE_ELSE = 555_000_777
+    ME = 7_000_000_111
+    SOMEONE_ELSE = 7_000_000_222
 
-    @pytest.fixture
-    def recorded(self, monkeypatch):
-        """The two bot_prefs functions, recording which user they were asked
-        about. Bound into `web.routes.api.me` at import, so that is the target;
-        the real ones would open the bot's SQLite.
-        """
-        calls = []
+    @staticmethod
+    async def _languages() -> dict:
+        return {r["user_id"]: r["language"] for r in await rows(
+            "SELECT user_id, language FROM app.user_preferences")}
 
-        def _write(user_id, language):
-            calls.append(("write", user_id, language))
-            return language
-
-        def _read(user_id, default="uk"):
-            calls.append(("read", user_id))
-            return default
-
-        monkeypatch.setattr("web.routes.api.me.write_language", _write)
-        monkeypatch.setattr("web.routes.api.me.read_language", _read)
-        return calls
-
-    def _headers(self):
-        return {"Cookie": f"dashboard_session={make_cookie(self.ORDINARY_ID, role='viewer')}"}
-
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "kwargs",
         [
@@ -591,34 +582,37 @@ class TestMeTouchesOnlyTheSessionsOwnRow:
         ],
         ids=["body-user_id", "body-nested-id", "query-param", "header"],
     )
-    def test_no_supplied_identifier_redirects_the_write(
-        self, client, monkeypatch, recorded, kwargs
+    async def test_no_supplied_identifier_redirects_the_write(
+        self, monkeypatch, tmp_path, kwargs
     ):
-        install_store(monkeypatch, status="approved", role="viewer")
-        headers = {**self._headers(), **kwargs.pop("headers", {})}
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await execute("INSERT INTO app.user_preferences (user_id, language) "
+                          "VALUES ($1, 'en')", self.SOMEONE_ELSE)
+            async with signed_in("viewer", user_id=self.ME) as me:
+                r = await me.patch("/api/me/preferences", **kwargs)
 
-        r = client.patch("/api/me/preferences", headers=headers, **kwargs)
+            assert r.status_code == 200
+            assert await self._languages() == {self.ME: "ru", self.SOMEONE_ELSE: "en"}
+
+    @pytest.mark.asyncio
+    async def test_the_read_is_the_sessions_own_row_too(self, monkeypatch, tmp_path):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await execute("INSERT INTO app.user_preferences (user_id, language) "
+                          "VALUES ($1, 'ru'), ($2, 'en')", self.ME, self.SOMEONE_ELSE)
+            async with signed_in("viewer", user_id=self.ME) as me:
+                r = await me.get("/api/me", params={"user_id": self.SOMEONE_ELSE})
 
         assert r.status_code == 200
-        assert recorded == [("write", self.ORDINARY_ID, "ru")]
+        assert r.json()["user"]["id"] == self.ME
+        assert r.json()["preferences"]["language"] == "ru"
 
-    def test_the_read_is_the_sessions_own_row_too(self, client, monkeypatch, recorded):
-        install_store(monkeypatch, status="approved", role="viewer")
-
-        r = client.get("/api/me", headers=self._headers(), params={"user_id": self.SOMEONE_ELSE})
-
-        assert r.status_code == 200
-        assert r.json()["user"]["id"] == self.ORDINARY_ID
-        assert [c for c in recorded if c[0] == "read"] == [("read", self.ORDINARY_ID)]
-
-    def test_an_unsupported_language_is_refused_before_any_write(
-        self, client, monkeypatch, recorded
+    @pytest.mark.asyncio
+    async def test_an_unsupported_language_is_refused_before_any_write(
+        self, monkeypatch, tmp_path
     ):
-        install_store(monkeypatch, status="approved", role="viewer")
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            async with signed_in("viewer", user_id=self.ME) as me:
+                r = await me.patch("/api/me/preferences", json={"language": "de"})
 
-        r = client.patch(
-            "/api/me/preferences", headers=self._headers(), json={"language": "de"},
-        )
-
-        assert r.status_code == 400
-        assert recorded == []
+            assert r.status_code == 400
+            assert await self._languages() == {}

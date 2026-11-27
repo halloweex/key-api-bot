@@ -559,29 +559,43 @@ class _CaptureMeili:
 async def _index_once(store):
     """Run `sync_to_meilisearch` once, as a first (full) sync.
 
-    Returns the captured documents, the watermark keys it read and wrote, and
-    its stats. The store is never connected and its DuckDB connection is a
-    trap. The watermark primitives are stubbed: the question here is what the
-    index is built from.
+    Returns the captured documents and its stats. The store is never
+    connected and its DuckDB connection is a trap. The watermark is stubbed
+    out — no cursor read, none written — so every run here is a full one:
+    the question is what the index is built from. The cursor itself is
+    `TestTheSearchIndexKeepsOneWatermark`'s.
     """
     from core.sync_service import SyncService
 
-    capture, keys = _CaptureMeili(), {"read": [], "written": []}
+    capture = _CaptureMeili()
 
-    async def get_last(key="orders"):
-        keys["read"].append(key)
-        return None                      # no watermark → full sync
+    async def no_cursor(key="orders"):
+        return None
 
-    async def set_last(key="orders", timestamp=None):
-        keys["written"].append(key)
+    async def keep_no_cursor(key="orders", timestamp=None):
+        return None
 
     svc = SyncService.__new__(SyncService)
     svc.store = store
     with patch("core.sync_service.get_meili_client", return_value=capture), \
-         patch.object(store, "get_last_sync_time", side_effect=get_last), \
-         patch.object(store, "set_last_sync_time", side_effect=set_last):
+         patch.object(store, "get_last_sync_time", side_effect=no_cursor), \
+         patch.object(store, "set_last_sync_time", side_effect=keep_no_cursor):
         stats = await svc.sync_to_meilisearch()
-    return capture.docs, keys, stats
+    return capture.docs, stats
+
+
+async def _sync(store):
+    """Run `sync_to_meilisearch` as the scheduler does, its cursor read from
+    and written to Postgres; only the Meilisearch client is stood in.
+    Returns what it indexed and its stats."""
+    from core.sync_service import SyncService
+
+    capture = _CaptureMeili()
+    svc = SyncService.__new__(SyncService)
+    svc.store = store
+    with patch("core.sync_service.get_meili_client", return_value=capture):
+        stats = await svc.sync_to_meilisearch()
+    return capture.docs, stats
 
 
 SEARCH_INDEX = golden("search_index")
@@ -602,7 +616,7 @@ class TestTheSearchIndexDocumentsAreTheLiteral:
         """Under the suite's `TZ=UTC`: DuckDB's documents, recorded while
         Postgres built the same ones."""
         monkeypatch.setenv("TZ", "UTC")
-        docs, _, stats = await _index_once(original_in_postgres)
+        docs, stats = await _index_once(original_in_postgres)
         for kind in ("buyers", "orders", "products"):
             assert docs[kind], f"no {kind} indexed — the literal would pin nothing"
         assert _as_recorded(docs, stats) == SEARCH_INDEX[
@@ -620,7 +634,7 @@ class TestTheSearchIndexDocumentsAreTheLiteral:
         from core.pg_search_index_read import local_zone
 
         monkeypatch.setenv("TZ", "UTC")
-        docs, _, _ = await _index_once(original_in_postgres)
+        docs, _ = await _index_once(original_in_postgres)
         assert any(d["ordered_at"] for d in docs["orders"].values())
         for i, d in docs["orders"].items():
             if d["ordered_at"]:
@@ -643,7 +657,7 @@ class TestTheSearchIndexUnderANonUtcZone:
     @pytest.mark.asyncio
     async def test_kyiv_offsets_across_dst(self, original_in_postgres, monkeypatch):
         monkeypatch.setenv("TZ", "Europe/Kyiv")
-        docs, _, stats = await _index_once(original_in_postgres)
+        docs, stats = await _index_once(original_in_postgres)
         offsets = {d["ordered_at"][-6:] for d in docs["orders"].values() if d["ordered_at"]}
         assert offsets and offsets <= {"+02:00", "+03:00"}, offsets
         assert _as_recorded(docs, stats) == SEARCH_INDEX[
@@ -651,14 +665,54 @@ class TestTheSearchIndexUnderANonUtcZone:
 
 
 class TestTheSearchIndexKeepsOneWatermark:
-    """Postgres' watermark is `mirrored_at`'s clock, under its own key. The
-    DuckDB index's key, `meilisearch` (`synced_at`'s clock), went with the
-    DuckDB frames in S14-07: it is neither read nor written."""
+    """The index's cursor is chain 3's sync key, `last_sync_meilisearch_pg`
+    in `meta.chain_watermarks` (`pg_orders_write.CHAIN_SYNC_KEYS`), on the
+    clock of the rows' `mirrored_at`. Run for real here, the cursor included,
+    with only the Meilisearch client stood in."""
+
+    CURSOR = "last_sync_meilisearch_pg"
+    _ROW = "FROM meta.chain_watermarks WHERE key = $1"
 
     @pytest.mark.asyncio
-    async def test_the_key_is_postgres_alone(self, original_in_postgres):
-        _, keys, _ = await _index_once(original_in_postgres)
-        assert keys == {"read": ["meilisearch_pg"], "written": ["meilisearch_pg"]}
+    async def test_a_run_after_a_run_indexes_only_what_was_mirrored_since(
+        self, original_in_postgres,
+    ):
+        """A first run indexes everything and stamps the cursor; a second
+        finds nothing mirrored since and indexes nothing; once order 2 is
+        mirrored again, a third indexes that order and its buyer alone. The
+        row the database held under the key is put back after."""
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            before = await conn.fetch(f"SELECT * {self._ROW}", self.CURSOR)
+            await conn.execute(f"DELETE {self._ROW}", self.CURSOR)
+        try:
+            first_docs, first = await _sync(original_in_postgres)
+            async with pool.acquire() as conn:
+                stamped = await conn.fetchval(f"SELECT value {self._ROW}", self.CURSOR)
+            second_docs, second = await _sync(original_in_postgres)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE bronze.orders SET mirrored_at = mirrored_at + interval '1 minute'"
+                    " WHERE id = 2")
+            third_docs, third = await _sync(original_in_postgres)
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute(f"DELETE {self._ROW}", self.CURSOR)
+                for row in before:
+                    await conn.execute(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, $3)", row["key"], row["value"], row["updated_at"])
+
+        assert first == {"buyers": 2, "orders": 7, "products": 4}, first
+        assert set(first_docs["orders"]) == {1, 2, 3, 4, 5, 6, 7}
+        assert stamped is not None, "the first run stamped no cursor under chain 3's key"
+        assert second == {"buyers": 0, "orders": 0, "products": 0}, second
+        assert second_docs == {"buyers": {}, "orders": {}, "products": {}}
+        assert third == {"buyers": 1, "orders": 1, "products": 0}, third
+        assert set(third_docs["orders"]) == {2}
+        assert set(third_docs["buyers"]) == {7}
 
     def test_the_literal_holds_the_two_zones_and_nothing_else(self):
         assert set(SEARCH_INDEX) == {call_key("sync_to_meilisearch", [z])

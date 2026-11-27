@@ -26,8 +26,7 @@ def _dotted(node) -> str:
 
 
 def _what_reaches_round_the_router(source: str):
-    """`(routers, reaches)` for one module: the `_*_run` functions — rule 5
-    of `test_read_fallback_sites.py` judges those — and, for every other
+    """`(routers, reaches)` for one module: the `_*_run` functions, and, for every other
     function, what it reaches that only a router may: an engine (a function
     of a `core.pg*` module — or, since step 14's S14-07, of a `core.ch_*`
     one — by the module or imported by name; `get_pool`; an import of
@@ -87,13 +86,13 @@ def _what_reaches_round_the_router(source: str):
 
 
 def _judged_by_rule_5(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
-    """The engine reaches of `fn`, in the words of S14-05's walk, that rule 5
-    of `test_read_fallback_sites.py` judges: every call its `_engine_calls`
+    """The engine reaches of `fn`, in the words of S14-05's walk, that the refusal
+    rule judges (an engine call inside the `try` whose handler refuses): every call its `_engine_calls`
     returns, and every import in `fn` binding what those calls are read by —
     a module by its alias (`from core import pg_x`, `import core.pg_x as y`),
     spelled out (`import core.pg_x`), or a function by its name (`from
-    core.pg_x import y`) — and the same of a `core.ch_*` module, which rule 5
-    reads since step 14's S14-07. `fn`'s own nodes only, as rule 5 reads
+    core.pg_x import y`) — and the same of a `core.ch_*` module, which it
+    reads since step 14's S14-07. `fn`'s own nodes only, as the rule reads
     it."""
     from tests.helpers.engine_walk import (
         ENGINE_PREFIXES, _engine_calls, _is_engine_module, _own_nodes,
@@ -115,7 +114,7 @@ def _judged_by_rule_5(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[s
 
 def _engine_held_as_a_value(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
     """Where `fn` holds an engine module or function other than as the
-    callee of a call rule 5 judges. `fetch = pg_gold_read.fetch_series`, then
+    callee of a call the refusal rule judges. `fetch = pg_gold_read.fetch_series`, then
     `await fetch(...)` outside the `try`, is a call neither walk sees."""
     from tests.helpers.engine_walk import (
         _engine_calls, _names_an_engine_module, _own_nodes,
@@ -144,14 +143,14 @@ def _engine_held_as_a_value(fn: ast.AST, aliases: Set[str], names: Set[str]) -> 
 def round_a_refusal(source: str, relpath: str) -> List[str]:
     """What in `source` reaches what only a router or a refusing helper may,
     and is neither. S14-05's walk of the tab modules
-    (`test_read_routers_postgres_only._what_reaches_round_the_router`: an
+    (`_what_reaches_round_the_router` above: an
     engine, the old shape's machinery, the environment), with one allowance:
-    a function rule 5 of `test_read_fallback_sites.py` holds clean — it
+    a function the refusal rule holds clean — it
     refuses, and every engine call it makes sits inside the `try` whose
-    handler is the refusal — may reach an engine, but only by what rule 5
+    handler is the refusal — may reach an engine, but only by what the refusal rule
     judges. Every other engine reach of it is still reported: S14-05's walk
-    sees calls rule 5 does not (a function imported by its name was one,
-    until the review of this PR's merge widened rule 5), and an engine held
+    sees calls the refusal rule does not (a function imported by its name was one,
+    until the review of this PR's merge widened the refusal rule), and an engine held
     as a value is called by a name no walk reads. A name defined twice in
     the file gets no allowance, since the walk keys its reaches by name."""
     from collections import Counter

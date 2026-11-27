@@ -6,8 +6,8 @@ container held the DuckDB file exclusively. Since step 14's S14-11 the script
 is Postgres alone — chain 4's derivation for the write path, a read-only
 transaction for the preview — and these tests pin both:
 
-* the write path runs `derive_gender_pg` and never imports `duckdb`, whatever
-  `KS_WRITE_BUYERS` says;
+* the write path, run against chain 4's tables, decides the buyers it should
+  and never a human's override;
 * the preview reads Postgres inside a READ-ONLY transaction — in production the
   only DSN at hand is the web container's writer DSN — and summarises counts
   only, never a name.
@@ -19,9 +19,7 @@ would stop running without anyone being told.
 """
 from __future__ import annotations
 
-import ast
 import importlib.util
-import inspect
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -102,24 +100,9 @@ class TestSummarise:
             assert token not in text
 
 
-class TestThePreviewIsReadOnly:
-    def test_the_postgres_read_opens_a_read_only_transaction(self):
-        """Structure, not prose: the call itself must carry readonly=True."""
-        tree = ast.parse(inspect.getsource(gender_backfill.read_stored_postgres))
-        calls = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Attribute) and n.func.attr == "transaction"]
-        assert calls, "read_stored_postgres opens no transaction"
-        for call in calls:
-            kw = {k.arg: k.value for k in call.keywords}
-            assert isinstance(kw.get("readonly"), ast.Constant) and kw["readonly"].value is True
-
-
 class TestTheWritePathIsPostgres:
-    """Since step 14's S14-11 the write path is chain 4's derivation,
-    whatever `KS_WRITE_BUYERS` says, latched or not. Until then it followed
-    the chain's `mode()` — DuckDB's `derive_gender`, or exit 4 for a chain
-    flagged and not latched, or a flag nobody could read."""
+    """Since step 14's S14-11 the write path is chain 4's derivation. What it
+    writes is `TestAgainstARealPostgres`'s; here, how a failure is answered."""
 
     @pytest.fixture
     def pg(self, monkeypatch):
@@ -134,23 +117,6 @@ class TestTheWritePathIsPostgres:
         return monkeypatch, derive
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("flag", [None, "duckdb", "postgres", "postgre"])
-    @pytest.mark.parametrize("latched", [True, False])
-    async def test_it_derives_in_postgres_whatever_the_flag(self, pg, flag, latched):
-        """Mutation: route by the flag or the latch again."""
-        from core import chain_latch, pg_buyers_write
-
-        env, derive = pg
-        if flag is None:
-            env.delenv(pg_buyers_write.WRITE_ENV, raising=False)
-        else:
-            env.setenv(pg_buyers_write.WRITE_ENV, flag)
-        if latched:
-            chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
-        assert await script.main(rebuild_all=True, dry_run=False) == script.EXIT_OK
-        derive.assert_awaited_once_with(rebuild_all=True)
-
-    @pytest.mark.asyncio
     async def test_a_failed_derivation_is_exit_1(self, pg):
         _env, derive = pg
         derive.return_value = {**derive.return_value, "error": "OSError: down"}
@@ -160,7 +126,11 @@ class TestTheWritePathIsPostgres:
 @needs_pg
 class TestAgainstARealPostgres:
     @pytest.mark.asyncio
-    async def test_the_postgres_rendering_runs_and_writes_nothing(self):
+    async def test_the_preview_reads_in_a_read_only_transaction_and_writes_nothing(self):
+        """In production the preview's only DSN is web's writer DSN, so its
+        read must be one a write cannot ride on. The buyers it reads are a
+        view whose every row asks Postgres whether the transaction reading it
+        is read-only, and refuses to be read otherwise."""
         import asyncpg
 
         conn = await asyncpg.connect(DSN)
@@ -168,17 +138,24 @@ class TestAgainstARealPostgres:
             # Stand-ins in `app`, not TEMP tables: production revokes TEMP from
             # PUBLIC, and a test that only passes with TEMP proves nothing about
             # a correctly provisioned database.
-            await conn.execute("DROP TABLE IF EXISTS app.t_bg_gender")
-            await conn.execute("DROP TABLE IF EXISTS app.t_bg_buyers")
+            await _drop_stand_ins(conn)
             await conn.execute(
-                "CREATE TABLE app.t_bg_buyers (id INTEGER PRIMARY KEY, full_name TEXT)")
+                "CREATE TABLE app.t_bg_names (id INTEGER PRIMARY KEY, full_name TEXT)")
+            await conn.execute(
+                "CREATE FUNCTION app.t_bg_read_only() RETURNS boolean LANGUAGE plpgsql AS $$ "
+                "BEGIN IF current_setting('transaction_read_only') <> 'on' THEN "
+                "RAISE EXCEPTION 'read outside a read-only transaction'; END IF; "
+                "RETURN TRUE; END $$")
+            await conn.execute(
+                "CREATE VIEW app.t_bg_buyers AS SELECT id, full_name "
+                "FROM app.t_bg_names WHERE app.t_bg_read_only()")
             await conn.execute("""
                 CREATE TABLE app.t_bg_gender (
                     buyer_id INTEGER PRIMARY KEY, gender TEXT,
                     rules_version INTEGER NOT NULL,
                     override_by_human BOOLEAN NOT NULL DEFAULT FALSE)""")
             await conn.executemany(
-                "INSERT INTO app.t_bg_buyers VALUES ($1, $2)",
+                "INSERT INTO app.t_bg_names VALUES ($1, $2)",
                 [(1, WOMAN), (2, MAN), (3, UNDECIDABLE)])
             await conn.executemany(
                 "INSERT INTO app.t_bg_gender VALUES ($1, $2, $3, $4)",
@@ -190,14 +167,38 @@ class TestAgainstARealPostgres:
             s = summarise(rows)
             assert (s["buyers"], s["missing"], s["stale"]) == (3, 1, 1)
             assert s["changes"] == {"m→f": 1}
-
-            # Nothing written, and the transaction really was read-only: the
-            # same snapshot shape refuses a write outright.
             assert await conn.fetchval("SELECT count(*) FROM app.t_bg_gender") == 2
-            with pytest.raises(asyncpg.exceptions.ReadOnlySQLTransactionError):
-                async with conn.transaction(isolation="repeatable_read", readonly=True):
-                    await conn.execute("DELETE FROM app.t_bg_gender")
         finally:
-            await conn.execute("DROP TABLE IF EXISTS app.t_bg_gender")
-            await conn.execute("DROP TABLE IF EXISTS app.t_bg_buyers")
+            await _drop_stand_ins(conn)
             await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_all_rederives_every_buyer_but_a_humans_decision(self):
+        """`--all` through the script against chain 4's tables: a buyer with
+        no verdict is decided, a current verdict the rules decide otherwise
+        is rewritten, and a human's override is kept."""
+        from tests.helpers.buyers_fixture import buyers_in_postgres
+
+        async with buyers_in_postgres() as pool:
+            await pool.executemany(
+                "INSERT INTO bronze.buyers (id, full_name) VALUES ($1, $2)",
+                [(1, WOMAN), (2, MAN), (3, UNDECIDABLE), (4, WOMAN)])
+            await pool.executemany(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, rules_version, "
+                "override_by_human) VALUES ($1, $2, 'test', $3, $4)",
+                [(2, "f", RULES_VERSION, False), (4, "m", RULES_VERSION, True)])
+
+            assert await script.main(rebuild_all=True, dry_run=False) == script.EXIT_OK
+
+            verdicts = {r["buyer_id"]: (r["gender"], r["override_by_human"])
+                        for r in await pool.fetch(
+                            "SELECT buyer_id, gender, override_by_human FROM app.buyer_gender")}
+        assert verdicts == {1: ("f", False), 2: ("m", False), 3: (None, False),
+                            4: ("m", True)}
+
+
+async def _drop_stand_ins(conn) -> None:
+    await conn.execute("DROP VIEW IF EXISTS app.t_bg_buyers")
+    await conn.execute("DROP FUNCTION IF EXISTS app.t_bg_read_only()")
+    await conn.execute("DROP TABLE IF EXISTS app.t_bg_names")
+    await conn.execute("DROP TABLE IF EXISTS app.t_bg_gender")

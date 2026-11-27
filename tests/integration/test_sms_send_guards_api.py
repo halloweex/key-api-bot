@@ -17,7 +17,6 @@ step 14's S14-08 (they ran over DuckDB until then;
 """
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timedelta
 
@@ -27,7 +26,7 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 
 from core.permissions import ADMIN_USER_IDS
-from core.turbosms import TurboSmsClient, TurboSmsConfig
+from tests.helpers.sms_send_gateway import install_gateway
 from tests.integration import pg_sms_seed
 from web.main import app
 from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
@@ -66,53 +65,10 @@ def client():
 
 # ─── The gateway ────────────────────────────────────────────────────────────
 
-class _Gateway:
-    """TurboSMS over a mock transport: a balance, and whatever is sent."""
-
-    def __init__(self):
-        self.balance: object = 1_000_000.0
-        self.balance_status = 200
-        self.calls: list = []
-
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path.strip("/")
-        self.calls.append(path)
-        if path == "user/balance.json":
-            if self.balance_status != 200:
-                return httpx.Response(self.balance_status, text="upstream error")
-            result = {} if self.balance is None else {"balance": self.balance}
-            return httpx.Response(200, json={
-                "response_code": 0, "response_status": "OK", "response_result": result,
-            })
-        if path == "message/send.json":
-            body = json.loads(request.content)
-            return httpx.Response(200, json={
-                "response_code": 0, "response_status": "OK",
-                "response_result": [
-                    {"phone": p, "response_code": 0, "message_id": f"m-{p}",
-                     "response_status": "OK"}
-                    for p in body["recipients"]
-                ],
-            })
-        return httpx.Response(404, json={"response_code": 404})
-
-    @property
-    def sends(self) -> int:
-        return self.calls.count("message/send.json")
-
-
 @pytest.fixture
 def gateway(monkeypatch):
-    gw = _Gateway()
-    config = TurboSmsConfig(token="test-token-not-real", sender="KoreanStory",
-                            viber_sender="KoreanStory", price_per_part=1.28)
-
-    def factory(*_a, **_kw):
-        return TurboSmsClient(config, transport=httpx.MockTransport(gw.handler))
-
-    monkeypatch.setattr("web.routes.api.customers.TurboSmsClient", factory)
-    monkeypatch.setattr("web.routes.api.customers.TurboSmsConfig", lambda: config)
-    return gw
+    """TurboSMS over a mock transport: a balance, and an answer to each send."""
+    return install_gateway(monkeypatch)
 
 
 # ─── A store that claims the way the real one does ──────────────────────────
@@ -691,8 +647,18 @@ async def _frozen(store, campaign: str, members: list) -> None:
     )
 
 
-def _send_to(aclient, campaign: str, confirm: "str | None" = None, text="Знижка 20%"):
-    params = {"text": text}
+async def _roster(campaign: str) -> dict:
+    """Each member's (message id, delivery status), by buyer, as Postgres holds it."""
+    async with pg_sms_seed.pg_conn() as conn:
+        rows = await conn.fetch(
+            "SELECT buyer_id, message_id, delivery_status"
+            " FROM app.sms_campaign_members WHERE campaign = $1", campaign)
+    return {r["buyer_id"]: (r["message_id"], r["delivery_status"]) for r in rows}
+
+
+def _send_to(aclient, campaign: str, confirm: "str | None" = None, text="Знижка 20%",
+             **extra):
+    params = {"text": text, **extra}
     if confirm is not None:
         params["confirm_campaign"] = confirm
     return aclient.post(f"/api/customers/sms-campaigns/{campaign}/send",
@@ -823,3 +789,133 @@ class TestTheGuardsOverAPostgresStore:
         assert gateway.calls == []
         assert await _claim_state("oct") is None, \
             "a campaign nothing was sent for must stay sendable"
+
+    # What the gateway's own failures leave behind. The 5 550 were sent twice
+    # because a timeout made the operator press send again while the first
+    # call was still running: whatever the gateway may have taken keeps the
+    # claim, so the second press is refused; only an answer that provably
+    # took nothing hands the campaign back.
+
+    @pytest.mark.asyncio
+    async def test_a_send_left_without_an_answer_keeps_the_claim(
+        self, aclient, real_store, gateway,
+    ):
+        """A read timeout comes after the batch was uploaded, and the gateway
+        may be delivering it: the campaign stays claimed and a second press
+        is refused before the gateway is asked again."""
+        await _frozen(real_store, "oct", [_member(1), _member(2)])
+        gateway.send_failures = ["timeout"]
+
+        r = await _send_to(aclient, "oct", confirm="oct")
+
+        assert r.status_code == 502
+        assert r.json()["reason"] == "gateway_outcome_unknown"
+        assert await _claim_state("oct") is not None, "an unknown outcome keeps the claim"
+        assert await _roster("oct") == {1: (None, None), 2: (None, None)}
+
+        again = await _send_to(aclient, "oct", confirm="oct")
+
+        assert (again.status_code, again.json()["reason"]) == (409, "already_sent")
+        assert gateway.sends == 1, "the roster went to the gateway once"
+
+    @pytest.mark.asyncio
+    async def test_a_batch_refused_mid_roster_records_what_went_and_keeps_the_claim(
+        self, aclient, real_store, gateway,
+    ):
+        """A roster goes to the gateway in batches of `RECIPIENTS_PER_REQUEST`.
+        When a later batch is refused, the earlier ones are on people's
+        phones: their message ids are kept, the rest are marked unsent, and
+        the campaign cannot be sent again. One batch and one more recipient,
+        whatever the batch size is."""
+        from core.turbosms import RECIPIENTS_PER_REQUEST as batch
+
+        members = [_member(i) for i in range(1, batch + 2)]
+        await _frozen(real_store, "big", members)
+        gateway.send_failures = [None, 405]
+
+        r = await _send_to(aclient, "big", confirm="big")
+
+        assert r.status_code == 200, r.text
+        assert (r.json()["accepted"], r.json()["unsent"]) == (batch, 1)
+        assert r.json()["partialError"], "a partial send does not read as a clean one"
+        assert gateway.sends == 2
+        went = set(gateway.sent[0])
+        assert len(went) == batch
+        assert await _roster("big") == {
+            m["buyerId"]: ((f"m-{m['phone']}", "Accepted") if m["phone"] in went
+                           else (None, "NotSent"))
+            for m in members
+        }
+        assert await _claim_state("big") is not None
+
+        again = await _send_to(aclient, "big", confirm="big")
+
+        assert (again.status_code, again.json()["reason"]) == (409, "already_sent")
+        assert gateway.sends == 2, "nobody of the first batch is messaged twice"
+
+    @pytest.mark.asyncio
+    async def test_a_send_the_gateway_refused_hands_the_claim_back(
+        self, aclient, real_store, gateway,
+    ):
+        """A 4xx is the gateway's own refusal: nothing was queued, nothing is
+        recorded, and the campaign goes once the cause is fixed."""
+        await _frozen(real_store, "oct", [_member(1), _member(2)])
+        gateway.send_failures = [405]
+
+        r = await _send_to(aclient, "oct", confirm="oct")
+
+        assert (r.status_code, r.json()["reason"]) == (502, "gateway_refused")
+        assert await _claim_state("oct") is None
+        assert await _roster("oct") == {1: (None, None), 2: (None, None)}
+
+        again = await _send_to(aclient, "oct", confirm="oct")
+
+        assert again.status_code == 200, again.text
+        assert await _roster("oct") == {1: ("m-380500000001", "Accepted"),
+                                        2: ("m-380500000002", "Accepted")}
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_viber_button_leaves_the_campaign_sendable(
+        self, aclient, real_store, gateway,
+    ):
+        """A button caption with no URL is the caller's mistake: refused with
+        nothing claimed, so the corrected send goes."""
+        await _frozen(real_store, "oct", [_member(1)])
+
+        r = await _send_to(aclient, "oct", confirm="oct",
+                           channel="viber_sms", button_caption="Shop")
+
+        assert r.status_code == 400
+        assert gateway.calls == []
+        assert await _claim_state("oct") is None
+
+        again = await _send_to(aclient, "oct", confirm="oct")
+
+        assert again.status_code == 200, again.text
+        assert gateway.sends == 1
+
+    @pytest.mark.asyncio
+    async def test_a_roster_with_no_targets_is_refused_and_left_unsent(
+        self, aclient, real_store, gateway,
+    ):
+        """That the roster holds nobody to message is known only after the
+        claim, so the claim is handed back: a stamp nothing clears would cost
+        the campaign its roster, the only control group it will ever have."""
+        await _frozen(real_store, "ctl", [_member(1, "holdout"), _member(2, "holdout")])
+
+        r = await _send_to(aclient, "ctl", confirm="ctl")
+
+        assert (r.status_code, r.json()["reason"]) == (409, "no_targets")
+        assert gateway.calls == []
+        assert await _claim_state("ctl") is None
+
+        # Unsent, so the audience can still be frozen again and sent.
+        await real_store.freeze_sms_campaign(
+            campaign="ctl", customers=[_member(1), _member(2, "holdout")],
+            criteria={"grouping": "single"}, ltv_basis="margin",
+            sales_type="retail", holdout_pct=0, overwrite=True,
+        )
+        again = await _send_to(aclient, "ctl", confirm="ctl")
+
+        assert again.status_code == 200, again.text
+        assert gateway.sent == [["380500000001"]]

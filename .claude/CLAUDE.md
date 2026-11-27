@@ -596,15 +596,20 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-19, with revision 0039 (the promotions calendar)
-and the store up: 9 378 passed, 26 skipped** — measured in Docker as CI runs
-it (Python 3.14 with `requirements-dev.lock`, a throwaway Postgres 17.2,
-`TZ=UTC`); the skips are ClickHouse (18), "root lists a directory" (5), no
-real gpg (2) and one TIMESTAMPTZ case. Any change that lowers the passing
-count is a regression until explained. (It was 9 045 on 2026-11-18, after the
-cleanup that deleted 1 300 tombstone cases — tests guarding the finished
-DuckDB exit — 10 344 just before it, 9 288 on 2026-11-05, 1 297 on 2026-08-14
-without a store, and 3 771 with one on 2026-09-08.)
+**Baseline as of 2026-11-27, after batch 2 of the test rewrite (the review
+of 2026-11-18), with the store up: 9 341 passed, 44 skipped** — measured in
+Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
+Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (18), the Rust pilot's
+service (18, which `.github/workflows/rust-pilot.yml` runs), "root lists a
+directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
+lowers the passing count is a regression until explained; a batch of the
+rewrite explains its own drop, since it replaces brittle tests with fewer
+behavioural ones. (It was 9 470 just before it, on 2026-11-27; 9 221 on
+2026-11-23, after batches 0 and 1; 9 378 on 2026-11-19, with revision 0039;
+9 045 on 2026-11-18, after the cleanup that deleted 1 300 tombstone cases —
+tests guarding the finished DuckDB exit — 10 344 just before it, 9 288 on
+2026-11-05, 1 297 on 2026-08-14 without a store, and 3 771 with one on
+2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
@@ -1336,10 +1341,12 @@ any group (`SmsAudienceGroup`, at most `MAX_AUDIENCE_GROUPS` = 5).
   refused strictly (`extra="forbid"`, strict types, a 400 that names the
   group). A test holds the JSON form to the flat one: same keys, same bounds.
 - **One group selects what the audience selected before groups.**
-  `tests/sms_segments_legacy.py` freezes the query as it was on main at
-  5b4d1c61, and `test_sms_audience_groups_two_engines.py` runs it beside the
-  current one for every filter: the same rows, on PostgreSQL — and on DuckDB
-  too until step 14's S14-08 left Postgres the audience's only engine. On
+  The query as it was on main at 5b4d1c61 was run once on the fixture of
+  `test_sms_audience_groups_two_engines.py`, and its rows are the literal in
+  `tests/integration/golden/sms_audience_before_groups.json`; that test holds
+  the current query to them for every filter: the same rows, on PostgreSQL —
+  and beside the old query on DuckDB too until step 14's S14-08 left Postgres
+  the audience's only engine. On
   production on 2026-10-17, group B alone through both: zero rows different.
 - **A group's window is its own.** `scored` reads everyone inside the widest
   window and a narrower group carries `recency <= ?` in its own flag, so a
@@ -3690,8 +3697,9 @@ COUNT(*) FROM ( ... )` без имени производной таблицы; 
 двери зовут `reparse_router` без стора — `parse_full` для reclassify и CLI,
 `parse_incremental_locked` для остальных, — блок `utm_parse` и канарейка
 `utm_parse_mode_invalid` ушли, строка «→» находок `pg_order_utm_*` — та, что
-была при `postgres`. Обходы дверей — `tests/unit/test_utm_parse_doors.py`;
-разбор держится литерала того, что DuckDB писал на золотых фикстурах
+была при `postgres`. Двери проверены по поведению в
+`tests/unit/test_utm_parse_doors.py`: `/refresh`, `/reclassify` и CLI над
+Postgres, с отказом на усечённой бронзе; разбор держится литерала того, что DuckDB писал на золотых фикстурах
 (`tests/integration/golden/utm_parse.json`). Ниже — история.
 
 **Перепарсинг UTM обязан отгружаться сам.** Три админских эндпоинта и
@@ -4071,8 +4079,9 @@ buyers step skip the tick with the watermark held, the assistant's tools
 return `data_unavailable`, and a job's result names
 `{"reason": "read_unavailable", "surface"}`.
 `tests/unit/test_read_fallback_consumers.py` derives where every refusal
-stops, and `tests/unit/test_read_fallback_sites.py` holds every engine call
-of a router inside a `try` whose handler is exactly that `raise`.
+stops, and the route sweep in `tests/unit/test_read_fallback_http.py`
+(`TestEveryRoute`) holds every GET route of a tab that reads a store, and the
+goal page's writes, to that 503 when the engine fails, never a 500.
 
 Until step 14 a failure was answered from DuckDB and counted
 (`read_fallbacks`), and `KS_READ_FALLBACK=off` (production from 2026-10-09)
@@ -4541,4 +4550,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-25 (K0: who executes a scheduler job, Python or Rust, and a lease in Postgres that keeps each job to one process; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
+*Last updated: 2026-11-27 (batch 2 of the test rewrite: the baseline and three references to tests it replaced; 2026-11-25: K0, who executes a scheduler job, Python or Rust, and a lease in Postgres that keeps each job to one process; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*

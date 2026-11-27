@@ -1,8 +1,8 @@
 """The `/traffic` statements, and the four defects the port exposed.
 
 The numbers are `tests/integration/test_traffic_two_engines.py`'s job, against
-a real Postgres; that the router asks Postgres and nothing else since step
-14's S14-05 is `tests/unit/test_read_routers_postgres_only.py`'s. What is
+a real Postgres; that a failure of its engine is refused naming `traffic` is
+the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s. What is
 proved here is the statements, plus the mistakes worth a permanent guard — three of
 them found by reading the queries while porting them, and each one a real
 defect on DuckDB too, not merely an incompatibility:
