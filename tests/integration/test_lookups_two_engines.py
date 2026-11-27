@@ -182,6 +182,22 @@ class TestTheOrderIsTheOrderOnScreen:
         assert "ЗНИЖКА" in names
         assert "" not in names and None not in names
 
+    @pytest.mark.asyncio
+    async def test_promocode_analytics_count_a_code_and_a_buyer_once(self, in_postgres):
+        """The list above keeps a code's case twins; the analytics fold them,
+        as the promocode filter does (`UPPER(...) = UPPER(?)`), and count a
+        promo customer once however many codes they used (2026-11-27). All
+        four promo orders here are buyer 7's, under three spellings of two
+        codes: the analytics said 3 codes and 3 customers until then."""
+        store, _pool = in_postgres
+        day = NOW.date()
+        out = await store.get_promocode_analytics(day - timedelta(days=10), day)
+        metrics = out["metrics"]
+        assert (metrics["totalCodes"], metrics["promoCustomers"], metrics["promoOrders"]) \
+            == (2, 1, 4)
+        assert {r["promocode"]: (r["orders"], r["revenue"], r["uniqueCustomers"])
+                for r in out["table"]} == {"SUMMER": (3, 2200.0, 1), "ЗНИЖКА": (1, 300.0, 1)}
+
 
 class TestWhenNothingIsUnbranded:
     """The other side of the EXISTS branch: with no unbranded product, the

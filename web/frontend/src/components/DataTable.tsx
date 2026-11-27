@@ -146,6 +146,8 @@ interface CellProps {
   variant?: Variant
   /** Renders a sticky-background cell (paired with DataTable stickyHeader). */
   sticky?: boolean
+  /** Stays at the left edge while the table scrolls sideways. */
+  pinned?: boolean
   colSpan?: number
 }
 
@@ -161,12 +163,20 @@ interface TdProps extends CellProps {
 const thBaseFeature = 'font-semibold text-slate-600'
 const thBaseAdmin = ''
 
+// A pinned column stays at the left edge while the table scrolls sideways —
+// the name of what each row is (NN/g "Data Tables": freeze the identifier
+// column). Opaque, with a hairline on its right, so the scrolled cells pass
+// under it rather than through it. The header's pinned cell sits above both.
+const pinnedHead = 'sticky left-0 top-0 z-20 bg-white shadow-[1px_0_0_#e2e8f0]'
+const pinnedCell = 'sticky left-0 z-[1] bg-white shadow-[1px_0_0_#e2e8f0]'
+
 export const Th = memo(function Th({
   children,
   align = 'left',
   hideBelow,
   variant = 'feature',
   sticky = false,
+  pinned = false,
   colSpan,
 }: CellProps) {
   const base = variant === 'admin' ? thBaseAdmin : thBaseFeature
@@ -179,6 +189,7 @@ export const Th = memo(function Th({
         alignClass[align],
         hideBelow ? hideClass[hideBelow] : '',
         sticky ? 'bg-white' : '',
+        pinned ? pinnedHead : '',
       ]
         .filter(Boolean)
         .join(' ')}
@@ -206,8 +217,13 @@ interface SortableThProps {
   onSort: (column: string) => void
   align?: 'left' | 'right'
   hideBelow?: HideBelow
+  /** Stays at the left edge while the table scrolls sideways. */
+  pinned?: boolean
 }
 
+// The click lives on a button that fills the cell, not on the <th>: a header
+// a mouse could sort and a keyboard could not reach was the gap the margin
+// tab's audit found (2026-11-26).
 export const SortableTh = memo(function SortableTh({
   column,
   label,
@@ -216,6 +232,7 @@ export const SortableTh = memo(function SortableTh({
   onSort,
   align = 'left',
   hideBelow,
+  pinned = false,
 }: SortableThProps) {
   const isActive = sortBy === column
   const arrow = isActive ? (sortDir === 'asc' ? '▲' : '▼') : ''
@@ -224,20 +241,25 @@ export const SortableTh = memo(function SortableTh({
     <th
       className={[
         'py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide',
-        'cursor-pointer select-none hover:text-slate-900 hover:bg-slate-100 transition-colors',
+        'select-none hover:text-slate-900 hover:bg-slate-100 transition-colors',
         align === 'right' ? 'text-right' : 'text-left',
         hideBelow ? hideClass[hideBelow] : '',
+        pinned ? pinnedHead : '',
       ]
         .filter(Boolean)
         .join(' ')}
-      onClick={() => onSort(column)}
       aria-sort={isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
-      <span className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className={`inline-flex w-full cursor-pointer items-center gap-1 uppercase tracking-wide
+                    ${align === 'right' ? 'justify-end' : 'justify-start'}`}
+      >
         {align === 'right' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
         {label}
         {align === 'left' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
-      </span>
+      </button>
     </th>
   )
 })
@@ -250,6 +272,7 @@ export const Td = memo(function Td({
   tabular = false,
   bold = false,
   sticky = false,
+  pinned = false,
   faded = false,
   colSpan,
 }: TdProps) {
@@ -263,6 +286,7 @@ export const Td = memo(function Td({
         tabular ? 'tabular-nums' : '',
         bold ? 'font-medium text-slate-800' : '',
         sticky ? 'bg-white' : '',
+        pinned ? pinnedCell : '',
         faded ? 'opacity-50 pointer-events-none' : '',
       ]
         .filter(Boolean)

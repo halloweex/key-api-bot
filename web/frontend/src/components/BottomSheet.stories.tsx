@@ -104,6 +104,25 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
+/**
+ * A record read beside a table: from `sm` up the sheet stands at the right
+ * edge, full height (`placement="side"`); on a phone it is the same bottom sheet.
+ */
+export const SideOnAWideScreen: Story = {
+  globals: { viewport: { value: 'desktop', isRotated: false } },
+  args: {
+    placement: 'side',
+    title: 'Lumiere Eye Cream EMS Lift 15 ml',
+    children: (
+      <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 text-sm">
+        <dt className="text-slate-500">Sale price</dt><dd className="text-right">₴1,200</dd>
+        <dt className="text-slate-500">Purchase price</dt><dd className="text-right">₴420</dd>
+        <dt className="text-slate-500">Margin</dt><dd className="text-right">65.0%</dd>
+      </dl>
+    ),
+  },
+}
+
 /** A condition's editor, as a phone shows it, with «Done» in the footer. */
 export const WithFooter: Story = {
   render: () => (
