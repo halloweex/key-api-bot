@@ -427,7 +427,7 @@
   "inventory.turnover.topExcess": "Найбільші пастки капіталу",
   "inventory.turnover.turnoverRatio": "Оборотність",
   "inventory.turnover.zeroVelocity": "Без продажів",
-  "inventory.uncategorized": "Без категорії",
+  "category.none": "Без категорії",
   "margin.alerts": "Сповіщення про низьку маржу",
   "margin.alertsDesc": "Бренди з маржею нижче порогу",
   "margin.brand": "Бренд",

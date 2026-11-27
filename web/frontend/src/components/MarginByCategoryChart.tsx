@@ -23,6 +23,7 @@ import {
 } from './chartConfig'
 import { useMarginByCategory } from '../hooks'
 import { formatCurrency, formatPercent } from '../utils/formatters'
+import { categoryLabel } from '../utils/categoryLabel'
 import { CATEGORY_COLORS } from '../utils/colors'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -54,15 +55,15 @@ export const MarginByCategoryChart = memo(function MarginByCategoryChart() {
   const chartData = useMemo<CategoryDataPoint[]>(() => {
     if (!data?.length) return []
     return data.map((item, i) => ({
-      name: truncateText(item.category, 20),
-      fullName: item.category,
+      name: truncateText(categoryLabel(item.category, t), 20),
+      fullName: categoryLabel(item.category, t),
       profit: item.profit,
       profitLabel: formatShortCurrency(item.profit),
       margin_pct: item.margin_pct,
       rev_share_pct: item.rev_share_pct,
       fill: CATEGORY_COLORS[i % CATEGORY_COLORS.length],
     }))
-  }, [data])
+  }, [data, t])
 
   const isEmpty = !isLoading && chartData.length === 0
 
