@@ -98,9 +98,15 @@ async def refresh_order_statuses(
 
     if background:
         task = asyncio.create_task(run_refresh(), name=f"refresh_statuses_{days}d")
+        # The loop holds tasks weakly; without this one it could be collected
+        # mid-flight, as the module's other detached work is kept from being.
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # `exception()` raises on a cancelled task; `run_refresh` has already
+        # logged the cancellation.
         task.add_done_callback(
             lambda t: logger.error(f"Background task failed: {t.exception()}")
-            if t.exception() else None
+            if not t.cancelled() and t.exception() else None
         )
         return {
             "status": "started",
