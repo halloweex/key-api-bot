@@ -7,6 +7,13 @@ limits every session carries. In ClickHouse: the shadow's five tables and
 nothing live, until the switch's half is uncommented on its own yes. The K1
 harness ships the shadow as both logins, so a grant they lack fails there; a
 grant nobody needs fails here.
+
+К2's shadow tables are the one named exception. They are not on production
+yet, so this file grants none of them: until the revision after Z3 creates
+them, the K2 harness creates and grants each one, and the worker writes it
+there as this login. A landing module renders its statement from its
+`SHADOW_TABLE`, so no statement's text names the table; the guard reads the
+name from that constant and holds it to the harness's grants.
 """
 from __future__ import annotations
 
@@ -24,6 +31,13 @@ SOURCES = "\n".join(
     p.read_text()
     for crate in ("ks-core", "ks-worker")
     for p in sorted((REPO / "rust/crates" / crate / "src").rglob("*.rs")))
+# К2's shadows, one per landing module, read from its `SHADOW_TABLE`.
+LANDING = REPO / "rust/crates/ks-worker/src/landing"
+LANDING_SHADOWS = {
+    name
+    for p in sorted(LANDING.glob("*.rs"))
+    for name in re.findall(r'^pub const SHADOW_TABLE: &str = "([a-z_]+\.[a-z_]+)";',
+                           p.read_text(), re.M)}
 
 
 def _granted(kind: str) -> set:
@@ -36,14 +50,37 @@ def _granted(kind: str) -> set:
 def test_select_is_granted_on_what_the_worker_reads_and_the_state_it_updates():
     read = set(re.findall(r"\b(?:FROM|JOIN)\s+([a-z_]+\.[a-z_]+)", SOURCES))
     written = set(re.findall(r"\b(?:INTO|UPDATE)\s+([a-z_]+\.[a-z_]+)", SOURCES))
+    written |= LANDING_SHADOWS
     assert read and written, "no statement found in the worker's sources"
-    # ON CONFLICT … DO UPDATE reads the row it updates.
-    assert _granted("SELECT") == read | written
+    # ON CONFLICT … DO UPDATE reads the row it updates. К2's shadows are the
+    # harness's: test_k2s_shadows_are_the_harnesss_until_their_revision.
+    assert _granted("SELECT") == (read | written) - LANDING_SHADOWS
 
 
 def test_insert_and_update_on_exactly_what_it_writes():
     written = set(re.findall(r"\b(?:INTO|UPDATE)\s+([a-z_]+\.[a-z_]+)", SOURCES))
-    assert _granted(r"INSERT,\s*UPDATE") == written == {"meta.mirror_state"}
+    written |= LANDING_SHADOWS
+    assert _granted(r"INSERT,\s*UPDATE") == written - LANDING_SHADOWS == {"meta.mirror_state"}
+
+
+def test_k2s_shadows_are_the_harnesss_until_their_revision():
+    """Each К2 shadow is granted by its harness, with the statements the
+    revision after Z3 will run, and by nothing in this file: production holds
+    no such table yet. The worker writes the shadow as this login there, so a
+    grant it lacks fails there. Its statement is rendered from the shadow's
+    name, never from the live table's."""
+    from tests.integration import test_rust_k2_expense_types as k2
+
+    assert LANDING_SHADOWS == {k2.SHADOW}
+    assert k2.SHADOW == k2.LIVE + "_rust"
+    assert set(k2.SHADOW_GRANTS) == {
+        "GRANT USAGE ON SCHEMA bronze TO ks_rust_worker",
+        f"GRANT SELECT, INSERT, UPDATE ON {k2.SHADOW} TO ks_rust_worker",
+    }
+    assert "bronze" not in STATEMENTS
+    module = (LANDING / "expense_types.rs").read_text()
+    assert "LazyLock::new(|| upsert_sql(SHADOW_TABLE))" in module
+    assert "upsert_sql(LIVE_TABLE)" not in SOURCES
 
 
 def test_usage_on_exactly_their_schemas():
