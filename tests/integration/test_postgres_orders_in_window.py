@@ -75,3 +75,46 @@ async def test_watermark_holds_back_recent_updates(monkeypatch):
         out = await _extract(pool, watermark=datetime(2026, 6, 10, 12, tzinfo=timezone.utc))
 
     assert set(out) == {1}
+
+
+# ─── What KeyCRM's side asks, asked of the store's ──────────────────────────
+#
+# KeyCRM's side files an order under its Kyiv date and keeps the sources this
+# system syncs. A day's difference moves an order between months and invents
+# a whole rollup cell; a source compared on one side only is a discrepancy
+# every morning.
+
+async def _populate_edges(conn, pool):
+    await seed(conn, orders=[
+        # 1 July in Kyiv, 30 June in UTC — and the other way round.
+        (21, 1, 12, 30.00, datetime(2026, 6, 30, 22, 30, tzinfo=timezone.utc), 910, 4, None),
+        (22, 1, 12, 60.00, datetime(2026, 5, 31, 21, 30, tzinfo=timezone.utc), 911, 4, None),
+        # Opencart: synced and reconciled, though never revenue.
+        (23, 3, 12, 40.00, datetime(2026, 6, 12, 9, tzinfo=timezone.utc), 912, None, None),
+        # A source this system does not sync.
+        (24, 6, 12, 70.00, datetime(2026, 6, 12, 9, tzinfo=timezone.utc), 913, None, None),
+    ])
+    await conn.execute("UPDATE bronze.orders SET updated_at = ordered_at")
+
+
+async def test_an_order_is_in_the_month_of_its_kyiv_date(monkeypatch):
+    """Mutation: take the date, or bound the window, in UTC."""
+    from core.reconciliation_io import postgres_orders_in_window
+
+    async with tab_in_postgres(DSN, monkeypatch, _populate_edges) as pool:
+        june = await _extract(pool)
+        july = await postgres_orders_in_window(
+            pool, date(2026, 7, 1), date(2026, 7, 31), watermark=WATERMARK)
+
+    assert june[22]["order_date"] == date(2026, 6, 1)
+    assert 21 not in june
+    assert {oid: f["order_date"] for oid, f in july.items()} == {21: date(2026, 7, 1)}
+
+
+async def test_a_source_it_does_not_sync_is_not_compared(monkeypatch):
+    """Mutation: drop the source filter — order 24 is compared."""
+    async with tab_in_postgres(DSN, monkeypatch, _populate_edges) as pool:
+        out = await _extract(pool)
+
+    assert set(out) == {22, 23}
+    assert out[23]["source_id"] == 3

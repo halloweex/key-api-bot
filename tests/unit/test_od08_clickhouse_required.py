@@ -27,7 +27,12 @@ import pytest
 
 from core import ch_history, ch_silver
 from core.data_quality import IntegrityIssue, Severity
+from tests.helpers.alerts_journal_pg import alert_ledger
+from tests.helpers.alerts_telegram import telegram_at_the_transport
+from tests.helpers.dq_journal_pg import pool  # noqa: F401
+from tests.helpers.orders_sync import keycrm_serving_orders, orders_in_postgres
 from tests.helpers.recon_chains_mirror_landing import run_mirror_landing
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 UNWATCHED = "gold_values_unwatched"
@@ -421,6 +426,27 @@ class TestTheHeldConditionsAreEveryCritical:
 # and the next morning's gated run reset the age: the canary announced the
 # page resolved while ClickHouse was still down.
 
+_DEAD_CLICKHOUSE = "clickhouse.test"
+
+
+def _clickhouse_refuses(request):
+    """ClickHouse down: a query sent to it is a refused connection."""
+    if request.url.host == _DEAD_CLICKHOUSE:
+        raise httpx.ConnectError("connection refused", request=request)
+    return None
+
+
+async def _copy_shipped(db, at):
+    """The ClickHouse copy's last good ship, as `ch_sync` stamps it."""
+    async with db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM meta.mirror_state WHERE table_name = 'clickhouse.silver_orders'")
+        await conn.execute(
+            "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at,"
+            " failures_since_ok, last_rows) VALUES ('clickhouse.silver_orders', $1, $1, 0, 0)",
+            at)
+
+
 async def _arm(copy_age, *, ch_down=True):
     """The real `_reconcile_clickhouse`, ClickHouse refusing every query."""
     from core.scheduler import BackgroundScheduler
@@ -458,48 +484,54 @@ class TestADeadClickHouseKeepsPaging:
         assert result["error"].startswith("ch_reconcile_pending: ")
         assert "25.5 h ago" in result["error"]
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_second_morning_of_an_outage_still_pages(self, monkeypatch):
-        """The reviewer's two mornings, persisted through the real
-        `_persist_ch_reconciliation` and the journal's real door, and judged
-        by the real canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h
-        old, the comparison raises. Day 2: still down, the copy is 25.5 h old.
-        The journal is chain 9's functions over a list (`tests/journal_fake.py`;
-        a DuckDB store until step 14's S14-10)."""
+    async def test_the_second_morning_of_an_outage_still_pages(self, pool, monkeypatch):  # noqa: F811
+        """The reviewer's two mornings, through the real 05:30 job: KeyCRM and
+        ClickHouse at their transports, the journal on the test Postgres, the
+        canary judging the ages the journal answers. Day 1: ClickHouse died
+        at 04:00, its copy is 1.5 h old, the comparison is refused. Day 2:
+        still down, the copy is 25.5 h old and gated. The last good morning
+        was 54 h ago, and the page this layer delivered is still standing."""
         from bot import canary
         from core import dq_journal
+        from core.alerting import delivered_conditions, raise_alert
         from core.scheduler import BackgroundScheduler
-        from tests.journal_fake import install_journal
 
-        install_journal(monkeypatch)
+        page = "recon_ch:missing_in_dk"
         now = datetime.now(timezone.utc)
-        await dq_journal.journal_run(                     # the last good morning
-            started_at=now - timedelta(hours=54), ended_at=now - timedelta(hours=54),
-            as_of=now, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-            layer="reconciliation_ch", issues=[], discrepancies=[])
+        async with orders_in_postgres(), alert_ledger(monkeypatch) as ledger:
+            with pytest.MonkeyPatch.context() as mp:
+                telegram_at_the_transport(mp)
+                assert await raise_alert(
+                    "ClickHouse lacks an order", conditions=[page],
+                    bucket="test:recon_ch", group="dq:reconciliation_ch") > 0
+            await dq_journal.journal_run(                     # the last good morning
+                started_at=now - timedelta(hours=54), ended_at=now - timedelta(hours=54),
+                as_of=now - timedelta(hours=56), window_start=date(2026, 7, 1),
+                window_end=date(2026, 9, 30), layer="reconciliation_ch",
+                issues=[], discrepancies=[])
+            monkeypatch.setenv("KS_CH_URL", f"http://{_DEAD_CLICKHOUSE}:8123")
+            keycrm_serving_orders(monkeypatch, [], answer=_clickhouse_refuses)
+            scheduler = BackgroundScheduler()
+            for copy_age in (timedelta(hours=1, minutes=30), timedelta(hours=25, minutes=30)):
+                await _copy_shipped(pool, now - copy_age)
+                await scheduler._run_dq_reconciliation()
+            errors = [r["error_message"] for r in await pool.fetch(
+                "SELECT error_message FROM app.data_quality_runs"
+                " WHERE layer = 'reconciliation_ch' ORDER BY run_id")]
+            ages = await dq_journal.last_success_ages_pg()
+            held = delivered_conditions()
+            resolved = await ledger.count("resolved")
 
-        scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
-        resolve = AsyncMock()
-        with patch("core.alerting.resolve_group", new=resolve):
-            for copy_age, started in (
-                (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
-                (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
-            ):
-                result, _ = await _arm(copy_age)
-                assert result["error"], result
-                await scheduler._persist_ch_reconciliation(
-                    result, started_at=started, as_of=started,
-                    window_start=date(2026, 7, 1),
-                    window_end=date(2026, 9, 30))
-
-        ages = await dq_journal.last_success_ages_pg()
+        assert len(errors) == 3 and errors[0] is None and all(errors[1:])
         failures, _ = canary.check_dq_freshness(
             {"data_quality": ages},
             {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
         assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
         assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
         # Neither blind morning announced anything resolved.
-        resolve.assert_not_awaited()
+        assert held == {page: "dq:reconciliation_ch"} and resolved == 0
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_that_compares_is_still_a_success(self):

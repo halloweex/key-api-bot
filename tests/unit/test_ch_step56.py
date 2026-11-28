@@ -1,18 +1,17 @@
 """Steps 5–6: silver into ClickHouse, Gold derived there, the archive inherited.
 
-The load-bearing assertion in this file is the no-third-dialect contract:
-`derive_gold_sql` must render every expression of `GOLD_MEASURES` verbatim —
-the same text Postgres and DuckDB render — because that is what dissolves the
-"рукописная проекция №3" objection. If someone rewrites a measure for
-ClickHouse by hand, this test names the divergence before the daily
-comparison has to.
+The load-bearing test in this file is `TestOneSilverTwoGolds`: from one
+Silver, ClickHouse derives the Gold Postgres derives, both grains, at zero
+tolerance — which is what dissolves the "рукописная проекция №3" objection.
+A measure rewritten for ClickHouse by hand, or a roll-up grouped or keyed
+differently, is named there before the daily comparison has to. It needs a
+live ClickHouse at KS_CH_URL as well as the test Postgres.
 """
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,13 +20,20 @@ from core.ch_silver import (
     SILVER_COLUMNS,
     _SILVER_DDL,
     compare_gold_cells,
-    derive_gold_sql,
     parse_tsv,
     render_tsv,
 )
 from core.data_quality import Severity
 from tests.helpers.recon_chains_ddl import declared_columns
-from tests.integration.pg_tab_seed import needs_postgres
+from tests.helpers.recon_clickhouse import (
+    FakeClickHouse,
+    archive_in_postgres,
+    clickhouse_at_the_transport,
+    fresh_clickhouse_copies,
+    kept_mirror_state,
+    needs_clickhouse,
+)
+from tests.integration.pg_tab_seed import DSN, derive, needs_postgres, seed, tab_in_postgres
 
 
 def _silver_row(**overrides):
@@ -90,20 +96,63 @@ class TestSilverWireFormat:
         assert declared_columns(_SILVER_DDL.format(name="silver.orders")) == set(SILVER_COLUMNS)
 
 
-class TestNoThirdDialect:
-    def test_every_measure_renders_verbatim(self):
-        from core.warehouse_sql import GOLD_MEASURES
+# One Silver for both engines, every measure non-trivial on DAY: one buyer on
+# two sources (a roll-up's distinct count is not the sum of its fine rows'),
+# a returning buyer, a return, b2b, and Opencart, which counts as no revenue.
+DAY, EARLIER = date(2026, 6, 10), date(2026, 5, 11)
 
-        fine, rollup = derive_gold_sql()
-        for name, expr in GOLD_MEASURES.items():
-            assert expr in fine, f"{name} was rewritten for ClickHouse"
-            assert expr in rollup, f"{name} was rewritten in the roll-up"
 
-    def test_rollup_carries_null_source_and_coarser_grouping(self):
-        fine, rollup = derive_gold_sql()
-        assert "GROUP BY order_date, sales_type, source_id" in fine
-        assert "GROUP BY order_date, sales_type\n" in rollup
-        assert "sales_type, NULL," in rollup
+def _at(day, hour):
+    return datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc)
+
+
+async def _every_measure(conn, pool):
+    await seed(conn, orders=[
+        # (id, source_id, status_id, grand_total, ordered_at, buyer, manager, promocode)
+        (3, 1, 12, 50.00, _at(EARLIER, 9), 502, None, None),
+        (1, 1, 12, 100.00, _at(DAY, 9), 501, None, None),
+        (2, 4, 12, 300.00, _at(DAY, 10), 501, None, None),
+        (4, 1, 12, 250.00, _at(DAY, 11), 502, None, None),
+        (5, 1, 19, 80.00, _at(DAY, 12), 503, None, None),
+        (6, 2, 12, 1000.00, _at(DAY, 13), 504, 15, None),
+        (7, 3, 12, 500.00, _at(DAY, 14), 505, None, None),
+    ])
+    await derive(pool)
+
+
+@needs_postgres
+@needs_clickhouse
+class TestOneSilverTwoGolds:
+    @pytest.mark.asyncio
+    async def test_clickhouse_derives_the_gold_postgres_derives(self, monkeypatch):
+        """`reconcile_clickhouse` ships Postgres' Silver, derives Gold inside
+        ClickHouse and sets it against Postgres' Gold cell by cell, both
+        grains: no finding is agreement. Then ClickHouse's Gold for DAY is
+        read directly — the roll-up's buyers are not the sum of its fine
+        rows'. Mutation: rewrite a measure for ClickHouse alone, or group the
+        roll-up by source too — a `ch_engines_gold_*` finding."""
+        from core.ch_common import execute
+
+        async with kept_mirror_state(ch_silver.SILVER_STATE, ch_silver.GOLD_STATE), \
+                tab_in_postgres(DSN, monkeypatch, _every_measure):
+            await fresh_clickhouse_copies()
+            issues = await ch_silver.reconcile_clickhouse()
+            text = await execute(
+                "SELECT sales_type, source_id, toString(revenue), orders_count,"
+                " unique_customers, new_customers, returning_customers, returns_count,"
+                " toString(returns_revenue) FROM gold.daily_revenue"
+                f" WHERE date = toDate('{DAY.isoformat()}')"
+                " ORDER BY sales_type, source_id NULLS FIRST FORMAT TabSeparated")
+
+        assert [(i.check_name, i.description) for i in issues] == []
+        assert [tuple(line.split("\t")) for line in text.strip().splitlines()] == [
+            ("b2b", "\\N", "1000", "1", "1", "1", "0", "0", "0"),
+            ("b2b", "2", "1000", "1", "1", "1", "0", "0", "0"),
+            ("retail", "\\N", "650", "3", "2", "1", "1", "1", "80"),
+            ("retail", "1", "350", "2", "2", "1", "1", "1", "80"),
+            ("retail", "3", "0", "0", "0", "0", "0", "0", "0"),
+            ("retail", "4", "300", "1", "1", "1", "0", "0", "0"),
+        ]
 
 
 class TestTheEngineVerdict:
@@ -142,37 +191,6 @@ class TestTheEngineVerdict:
         assert names == ["ch_engines_gold_extra", "ch_engines_gold_missing"]
 
 
-class _FakePool:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def acquire(self):
-        pool = self
-
-        class _Ctx:
-            async def __aenter__(self):
-                conn = AsyncMock()
-                conn.fetch = AsyncMock(return_value=pool._rows)
-
-                # The archive's liveness reads (L2-02): nothing waiting above
-                # the copy's ceiling, and a ship that succeeded just now.
-                async def fetchrow(sql, *args):
-                    if args and args[0] == ch_history.HEAL_ROW:
-                        return None  # no heal recorded (test_ch_history_heal_trace)
-                    if "order_versions" in sql:
-                        return {"n": 0, "oldest": None}
-                    return {"last_ok_at": datetime.now(timezone.utc),
-                            "failures_since_ok": 0}
-
-                conn.fetchrow = fetchrow
-                return conn
-
-            async def __aexit__(self, *a):
-                return False
-
-        return _Ctx()
-
-
 class TestTheArchiveCopy:
     def test_microseconds_survive_the_render(self):
         row = (1, 1001, datetime(2026, 8, 27, 19, 27, 25, 123456,
@@ -188,44 +206,27 @@ class TestTheArchiveCopy:
         }
         assert await ch_history.reconcile_ch_history() == []
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_equal_buckets_mean_silence(self, monkeypatch):
-        monkeypatch.setenv(ch_silver.URL_ENV, "http://ch:8123")
-
-        async def fake_execute(sql, *, body=None):
-            if "max(id)" in sql:
-                return "20000\n"
-            return "1\t10000\n2\t123\n"
-
-        monkeypatch.setattr(ch_history, "_execute", fake_execute)
-        import core.pg as pg
-
-        monkeypatch.setattr(
-            pg, "get_pool",
-            AsyncMock(return_value=_FakePool([(1, 10000), (2, 123)])),
-        )
-        assert await ch_history.reconcile_ch_history() == []
-
-    @pytest.mark.asyncio
-    async def test_a_short_bucket_is_critical(self, monkeypatch):
-        monkeypatch.setenv(ch_silver.URL_ENV, "http://ch:8123")
-
-        async def fake_execute(sql, *, body=None):
-            if "max(id)" in sql:
-                return "20000\n"
-            return "1\t9999\n2\t123\n"
-
-        monkeypatch.setattr(ch_history, "_execute", fake_execute)
-        import core.pg as pg
-
-        monkeypatch.setattr(
-            pg, "get_pool",
-            AsyncMock(return_value=_FakePool([(1, 10000), (2, 123)])),
-        )
-        (issue,) = await ch_history.reconcile_ch_history()
-        assert issue.check_name == "ch_history_buckets"
-        assert issue.severity is Severity.CRITICAL
-        assert issue.sample_ids == (1,)
+    @pytest.mark.parametrize("copy, expected", [
+        pytest.param(range(9_995, 10_005), [], id="equal-buckets-mean-silence"),
+        # One version below the copy's own MAX(id) lost: its bucket is short.
+        # Mutation: invert or drop the bucket comparison.
+        pytest.param([i for i in range(9_995, 10_005) if i != 10_001],
+                     [("ch_history_buckets", "CRITICAL", 1, (1,))],
+                     id="a-short-bucket-is-critical"),
+    ])
+    async def test_the_buckets_below_the_copy_s_ceiling(self, monkeypatch, copy, expected):
+        """Ten versions in Postgres across two 10 000-id buckets, the ship
+        healthy; ClickHouse holds `copy`."""
+        now = datetime.now(timezone.utc)
+        async with archive_in_postgres(monkeypatch) as archive:
+            await archive.versions(range(9_995, 10_005), captured_at=now - timedelta(days=2))
+            await archive.shipped(last_ok_at=now - timedelta(minutes=30))
+            clickhouse_at_the_transport(monkeypatch, FakeClickHouse(archive=copy))
+            found = await ch_history.reconcile_ch_history()
+        assert [(i.check_name, i.severity.value, i.count, tuple(i.sample_ids))
+                for i in found] == expected
 
 
 class TestTheColumnListsHaveOneHome:
