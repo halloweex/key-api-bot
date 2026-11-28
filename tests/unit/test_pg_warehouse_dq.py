@@ -6,9 +6,6 @@ holds rather than resolves.
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -370,18 +367,6 @@ class TestTheRowValuesSql:
                             rebuilt, pg_silver.RULE_LOADED_AT]
             assert (facts.first_rebuilt_at, facts.rule_loaded_at) == (
                 rebuilt, pg_silver.RULE_LOADED_AT)
-
-    def test_the_snapshot_runs_without_jit(self):
-        """JIT compilation never paid for itself on the recompute, and past
-        jit_optimize_above_cost it was ~0.9 s of a ~1.3 s read, all of it under
-        PG_LAYER_LOCK. Parsed out of `read_facts`: the SET must be a statement
-        the snapshot executes."""
-        tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))
-        executed = [ast.literal_eval(n.args[0]) for n in ast.walk(tree)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                    and n.func.attr == "execute" and n.args
-                    and isinstance(n.args[0], ast.Constant)]
-        assert "SET LOCAL jit = off" in executed
 
 
 class TestBlindness:

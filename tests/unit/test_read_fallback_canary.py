@@ -178,10 +178,8 @@ class TestThroughRunCanary:
 # ─── Through the app: what web publishes is what the canary reads ────────────
 
 def _production_switches(monkeypatch, fresh_read_fallback):
-    """Cohorts on ClickHouse with its address, as production has run since
-    31.08; `fresh_read_fallback` unsets every other KS_READ_*. (Nothing
-    reads either switch since step 14's S14-07.)"""
-    monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
+    """ClickHouse's address, as production has it; `fresh_read_fallback`
+    unsets every KS_READ_* (nothing reads them since step 14's S14-07)."""
     monkeypatch.setenv("KS_CH_URL", "http://ks-clickhouse:8123")
 
 

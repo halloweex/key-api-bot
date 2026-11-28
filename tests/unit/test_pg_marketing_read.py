@@ -12,19 +12,12 @@ table rename:
     place, and the five scalars must come from the roll-up rows *only*,
     because three of them are `COUNT(DISTINCT buyer_id)` and distinct counts
     do not add up;
-  * **the brand table**, which read `gold_daily_products` — DuckDB-only — and
-    now reads the line level, reproducing that table's grain so `SUM(order_count)`
-    keeps meaning what it has always meant.
+  * the brand table's «Заказов» is asked over seeded orders in
+    `tests/integration/test_marketing_two_engines.py`.
 """
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 from core.sql_dialect import POSTGRES, marketing_period_measures
-
-REPO = Path(__file__).resolve().parents[2]
-REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
 
 
 class TestTheTwoGoldShapes:
@@ -57,26 +50,3 @@ class TestTheTwoGoldShapes:
         """Not spelled twice: `gold_revenue_rollup` is the same hole the
         inventory views use for the same difference."""
         assert POSTGRES.gold_revenue_rollup in marketing_period_measures(POSTGRES)
-
-
-class TestTheBrandTableLeftTheGoldItCannotReach:
-    def _marketing_sql(self):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        node = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.AsyncFunctionDef)
-                    and n.name == "get_marketing_report_by_dates")
-        return ast.get_source_segment(source, node) or ""
-
-    def test_it_counts_orders_by_the_brand_cards_statement(self):
-        """«Заказов» is the orders that held the brand, each once — the
-        dashboard brand card's `_BRAND_ANALYTICS_SQL` (owner's decision,
-        2026-11-12). Until then the report summed per-product cells, one order
-        per product of the brand: NEOGEN, October 2026, 1 429 against 748."""
-        from core.repositories import revenue
-
-        body = "\n".join(l.split("--")[0].split("#")[0]
-                          for l in self._marketing_sql().splitlines())
-        assert "_BRAND_ANALYTICS_SQL" in body
-        assert "SUM(order_count)" not in body
-        assert "COUNT(DISTINCT l.order_id) AS orders" in revenue._BRAND_ANALYTICS_SQL
