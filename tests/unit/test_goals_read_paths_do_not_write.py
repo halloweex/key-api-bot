@@ -57,7 +57,7 @@ from tests.integration.pg_tab_seed import (
 )
 from tests.helpers.goals_history import _seed_history_pg
 from tests.helpers.route_sweep import (  # noqa: F401, F811 — fixtures
-    _request_for, no_network, sweep_client, swept_routes,
+    _request_for, sweep_client, swept_routes,
 )
 from tests.helpers.app_client import ConnectionPerAcquire
 
@@ -146,70 +146,73 @@ def _switched_on(endpoint) -> dict:
 
 # ─── The sweep ────────────────────────────────────────────────────────────
 
-def _writers_recorded(monkeypatch) -> list:
-    """Chain 7b-3's two Postgres writers, chain 7a's, and the month goal
-    freeze's (revision 0037), replaced by recorders that raise: a GET that
-    reached one is named. A month a GET reads unfrozen stays unfrozen."""
-    from core import goal_freeze, pg_forecast_write, pg_goals_write
+@pytest.fixture
+def loopback_only(monkeypatch):
+    """The sweep reaches the test database and nothing else: a socket to any
+    other address is refused at once instead of waiting on somebody's KeyCRM
+    or Meilisearch client."""
+    import socket
 
-    reached = []
+    local = {"127.0.0.1", "::1", "localhost"}
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    real_lookup = socket.getaddrinfo
 
-    def recorder(name):
-        async def _recorded(*a, **kw):
-            reached.append(name)
-            raise AssertionError(f"a GET reached {name}")
-        return _recorded
+    def _allowed(address) -> bool:
+        return not isinstance(address, tuple) or address[0] in local
 
-    for module, name in ((pg_forecast_write, "persist_goal_tables"),
-                         (pg_forecast_write, "store_predictions"),
-                         (pg_goals_write, "set_goal"),
-                         (goal_freeze, "freeze_month"),
-                         (goal_freeze, "_keep")):
-        monkeypatch.setattr(module, name, recorder(f"{module.__name__}.{name}"))
-    return reached
+    def connect(self, address):
+        if not _allowed(address):
+            raise OSError("the network is off in this test")
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        if not _allowed(address):
+            raise OSError("the network is off in this test")
+        return real_connect_ex(self, address)
+
+    def lookup(host, *args, **kwargs):
+        if host not in local:
+            raise OSError("the network is off in this test")
+        return real_lookup(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
 
 
+@needs_postgres
 class TestNoGetWrites:
     """Every GET route under /api, read off the app — never a list, so a GET
-    added tomorrow is held to it the day it is registered — in production's
-    state: the goal tables' writers are Postgres', and replaced by recorders
-    that raise; every Postgres goal read answers, with nothing stored in
-    `seasonal_indices` (the old trigger). Until S14-07 a sibling of this
-    swept the same routes against the goal tables in a DuckDB store; that
-    store is written by nothing in production.
+    added tomorrow is held to it the day it is registered — asked as an admin
+    over a test Postgres holding history and goal tables, with
+    `seasonal_indices` empty (the old trigger) and, in a second request,
+    every optional boolean switched on. The five goal tables must read back
+    byte-identical afterwards, whoever wrote to them."""
 
-    Mutations: M4 — restore `generate_smart_goals`' `indices_exist < 12`
-    branch, and `/api/goals/smart` reaches `persist_goal_tables`, named here;
-    M5 — let `/api/goals/forecast` honour `recalculate`, and its switched-on
-    request does too."""
-
-    def test_no_get_reaches_a_postgres_writer(
-        self, sweep_client, no_network, fresh_read_fallback, monkeypatch,
+    @pytest.mark.asyncio
+    async def test_no_get_changes_a_goal_table(
+        self, served, sweep_client, loopback_only, fresh_read_fallback,
     ):
+        import asyncio
+
         from web.main import app
         from web.ratelimit import limiter
 
-        reached = _writers_recorded(monkeypatch)
-        asked = []
+        before = await _fingerprint(served)
+        assert before["app.revenue_goals"] and not before["app.seasonal_indices"], (
+            "the fixture must hold goals and leave the old trigger set")
 
-        async def _nothing(sql, params=()):
-            asked.append(sql)
-            return []
-
-        monkeypatch.setattr("core.pg_goals_read.fetch", _nothing)
-
-        routes = swept_routes(app)
-        for endpoint in routes:
+        answered = {}
+        for endpoint in swept_routes(app):
             path, params = _request_for(endpoint)
             for extra in ({}, _switched_on(endpoint)):
                 limiter.reset()
-                sweep_client.get(path, params={**params, **extra})
-        assert reached == []
-        assert any("{" not in sql and "app.seasonal_indices" in sql for sql in asked), (
-            "no GET read the goal tables — the sweep proved nothing")
-        assert len(routes) >= 90, len(routes)
-        assert "/api/goals/smart" in {e.path for e in routes}
-        assert "/api/goals/forecast" in {e.path for e in routes}
+                response = await asyncio.to_thread(
+                    sweep_client.get, path, params={**params, **extra})
+                answered.setdefault(endpoint.path, set()).add(response.status_code)
+
+        assert await _fingerprint(served) == before
+        assert 200 in answered["/api/goals/smart"], "the sweep never read the goals"
 
     def test_the_sweep_switches_recalculate_on(self):
         """The second request per route is not vacuous for the one GET that

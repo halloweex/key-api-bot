@@ -41,6 +41,7 @@ import pytest_asyncio
 
 from core import analytics_captures as cap
 from core import chain_latch, pg_goals_write
+from tests.helpers.app_client import signed_in
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -218,6 +219,44 @@ class TestEveryKindIsKeptAsWhatItWas:
                                ("monthly", "1500000.00")):
             assert [v["goal_amount"] for v in await _versions(pool, period)] == [
                 Decimal(amount)]
+
+
+class TestTheRoutesSayWhatTheyWrote:
+    """The routes, called as an admin: what lands in the history is what the
+    request meant."""
+
+    @pytest_asyncio.fixture
+    async def served(self, monkeypatch):
+        monkeypatch.delenv(pg_goals_write.WRITE_ENV, raising=False)
+        monkeypatch.delenv(cap.SWITCH_ENV, raising=False)
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        await _clean(pool)
+        try:
+            yield pool
+        finally:
+            await _clean(pool)
+            await pool.close()
+
+    @pytest.mark.asyncio
+    async def test_a_typed_goal_is_a_custom_set(self, served):
+        async with signed_in("admin") as admin:
+            r = await admin.post("/api/goals?period_type=monthly&amount=4000000")
+        assert r.status_code == 200, r.text
+
+        versions = await _versions(served, "monthly")
+        assert [(v["change_kind"], v["is_custom"], v["goal_amount"]) for v in versions] == [
+            ("set", True, Decimal("4000000.00"))]
+
+    @pytest.mark.asyncio
+    async def test_a_reset_is_reset_to_auto(self, served):
+        async with signed_in("admin") as admin:
+            assert (await admin.post("/api/goals?period_type=daily&amount=99000")).status_code == 200
+            r = await admin.delete("/api/goals/daily")
+        assert r.status_code == 200, r.text
+
+        versions = await _versions(served, "daily")
+        assert [(v["change_kind"], v["is_custom"]) for v in versions] == [
+            ("set", True), ("reset_to_auto", False)]
 
 
 class _RollsBackAtTheEnd:

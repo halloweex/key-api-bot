@@ -646,6 +646,29 @@ class TestOnARealConnection:
         assert ok["failures_since_ok"] == 0 and ok["last_ok_at"] is not None
 
     @pytest.mark.asyncio
+    async def test_an_incremental_parse_is_captured_after_it_has_committed(self, committed):
+        """The parse's own transaction has ended when the capture runs, on the
+        same connection: the capture would refuse to run inside it, so a
+        `first` row and an ok stamp say it ran outside."""
+        comment = "UTM: utm_source: ig"
+        await order(committed, ORDER, comment=comment)
+
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(return_value=_OneConnectionPool(committed))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            result = await parse.parse_incremental()
+
+        assert result["parsed"] >= 1
+        assert not committed.is_in_transaction()
+        rows = await log(committed, f"order_id = {ORDER}")
+        assert [(r["change_kind"], five(r)) for r in rows] == [
+            ("first", verdict_of(comment))]
+        ok = await stamp(committed)
+        assert ok["failures_since_ok"] == 0 and ok["last_ok_at"] is not None
+        assert await committed.fetchval(
+            f"SELECT count(*) FROM {UTM_TABLE} WHERE order_id = $1", ORDER) == 1
+
+    @pytest.mark.asyncio
     async def test_it_waits_for_a_parse_holding_the_key_and_gives_up_bounded(
         self, committed,
     ):

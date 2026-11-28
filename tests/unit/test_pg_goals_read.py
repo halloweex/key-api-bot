@@ -47,7 +47,15 @@ asserted here as a property of the *text* instead.
 from __future__ import annotations
 
 import ast
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_tab_seed import needs_postgres, seed, derive, tab_in_postgres
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -106,18 +114,6 @@ class TestTheRoutedBodies:
         for name in BODIES:
             assert "timezone(" not in getattr(goals, name), name
 
-    def test_no_body_carries_its_own_return_or_source_rule(self):
-        """Silver has `is_return` — which prefers KeyCRM's status group — and
-        `is_active_source`. A second list of status ids here is a second
-        definition, and one of these bodies had a channel filter the other
-        lacked."""
-        from core.repositories import goals
-
-        for name in BODIES:
-            body = getattr(goals, name)
-            assert "status_id" not in body, name
-            assert "source_id IN" not in body, name
-
     def test_the_window_is_not_bound_with_current_date(self):
         """The two engines disagree about what day `CURRENT_DATE` is for three
         hours out of twenty-four, and under the gate they sit in one timezone
@@ -143,3 +139,37 @@ class TestTheRoutedBodies:
                    for n in ast.walk(node) if isinstance(n, ast.Name)), (
             "TODAY_IN_KYIV is no longer used to bound the window"
         )
+
+
+class TestWhatTheHistoryCounts:
+    """Silver decides what is a return and what is revenue; the goal history
+    asks it and keeps no list of its own. One day, `sales_type=all`."""
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_returns_and_retired_sources_are_left_out_and_the_fair_is_in(
+        self, monkeypatch,
+    ):
+        day = datetime.now(ZoneInfo("Europe/Kyiv")).replace(
+            hour=12, minute=0, second=0, microsecond=0) - timedelta(days=2)
+        # (id, source, status, total): an ordinary website order, the fair's,
+        # one in KeyCRM's lost group under a status no list names, one in a
+        # listed return status, and one on the retired shop.
+        orders = [(9101, 4, 1, 1000), (9102, 5, 1, 500), (9103, 4, 99, 700),
+                  (9104, 4, 19, 200), (9105, 3, 1, 300)]
+
+        async def populate(conn, pool):
+            await seed(conn, orders=[(oid, src, status, total, day, None, None, None)
+                                     for oid, src, status, total in orders])
+            await conn.execute(
+                "UPDATE bronze.orders SET status_group_id = 6 WHERE id = 9103")
+            await derive(pool)
+
+        async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, populate):
+            async with signed_in("viewer") as visitor:
+                r = await visitor.get("/api/goals/history", params={
+                    "period_type": "daily", "weeks_back": 1, "sales_type": "all"})
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert (body["periodCount"], body["average"]) == (1, 1500.0)

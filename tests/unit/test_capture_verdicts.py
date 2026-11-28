@@ -187,13 +187,6 @@ def _run_with_spy(coro_factory, *, kept=True):
 
 
 class TestWhereTheCaptureRuns:
-    def test_after_the_incremental_has_committed_on_its_connection(self):
-        result, events, seen, conn = _run_with_spy(lambda: parse.parse_incremental())
-        assert result["parsed"] == 0
-        assert events == ["parse: begin", "parse: end", "capture"]
-        assert seen == [{"table": "app.order_channel_verdicts", "conn": conn,
-                         "in_transaction": False, "kind": parse.CHANGE}]
-
     def test_the_full_parse_logs_what_it_replaces_first_and_its_own_after(self):
         """D12: the verdicts a reclassify overwrites are in the log before it
         overwrites them — an incremental capture before the parse's
