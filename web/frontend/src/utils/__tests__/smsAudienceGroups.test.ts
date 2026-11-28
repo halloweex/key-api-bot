@@ -21,16 +21,18 @@ const OWNER: SmsAudienceCriteria = {
 
 describe('groups on the wire', () => {
   it('sends one group exactly as before groups existed', () => {
-    // Same parameters, same order — a saved link or preset of one group asks
+    // The same parameters by name — a saved link or preset of one group asks
     // the server the question it always asked.
     const audience = {
       ...emptyAudience(),
       groups: [{ maxRecencyDays: 180, filters: { ordersMin: 2, brands: ['Anua'] } }],
     }
-    expect(audienceToParams(audience)).toBe(
-      'ltv_basis=margin&holdout_pct=10&grouping=single&max_recency_days=180'
-      + '&orders_min=2&brand=Anua',
-    )
+    const p = new URLSearchParams(audienceToParams(audience))
+    expect(Object.fromEntries(p)).toEqual({
+      ltv_basis: 'margin', holdout_pct: '10', grouping: 'single',
+      max_recency_days: '180', orders_min: '2', brand: 'Anua',
+    })
+    expect(p.has('or_groups')).toBe(false)
   })
 
   it('sends the first group flat and the rest as one JSON parameter', () => {

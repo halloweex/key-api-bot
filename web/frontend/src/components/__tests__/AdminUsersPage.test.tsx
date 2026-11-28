@@ -93,9 +93,12 @@ describe('AdminUsersPage — tab toggles', () => {
     const chip = await screen.findByRole('button', { name: 'access.tab.reports' })
     fireEvent.click(chip)
 
-    // The request has not answered yet, and the summary already says so.
+    // The request has not answered yet, and the summary (the button that
+    // expands the editor) already lists the new tab.
     await waitFor(() => {
-      expect(screen.getByText(/access\.tab\.reports/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { expanded: true })).toHaveTextContent(
+        'access.tab.traffic, access.tab.reports',
+      )
     })
     expect(patch).toHaveBeenCalledWith(4242, ['traffic', 'reports'])
 
@@ -117,7 +120,14 @@ describe('AdminUsersPage — tab toggles', () => {
   })
 
   it('puts the old set back when the request fails', async () => {
-    vi.spyOn(api, 'updateUserFeatures').mockRejectedValue(new Error('nope'))
+    // The failed request is followed by a refetch of the list. Keep that
+    // refetch pending, or the server's answer would restore the set by itself
+    // and hide a missing rollback.
+    vi.spyOn(api, 'getAdminUsers').mockReturnValue(new Promise(() => {}) as never)
+    let reject: (e: Error) => void = () => {}
+    vi.spyOn(api, 'updateUserFeatures').mockReturnValue(
+      new Promise((_, r) => { reject = r }) as never,
+    )
 
     const { client } = renderPage()
     openEditor()
@@ -125,9 +135,13 @@ describe('AdminUsersPage — tab toggles', () => {
     const chip = await screen.findByRole('button', { name: 'access.tab.reports' })
     fireEvent.click(chip)
 
-    await waitFor(() => {
-      const cached = client.getQueryData(['adminUsers', null, null]) as { users: AdminUser[] }
-      expect(cached.users[0].allowed_features).toEqual(['traffic'])
-    })
+    const features = () => (
+      client.getQueryData(['adminUsers', null, null]) as { users: AdminUser[] }
+    ).users[0].allowed_features
+    await waitFor(() => expect(features()).toEqual(['traffic', 'reports']))
+
+    reject(new Error('nope'))
+
+    await waitFor(() => expect(features()).toEqual(['traffic']))
   })
 })

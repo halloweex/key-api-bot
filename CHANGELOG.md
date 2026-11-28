@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.372
+
+- tests: batch 4, fe-sms — SMS tests check state and keys, not classes, sentences or storage keys
+- frontend: batch 4, fe-sms — export domainOf/ticksFor of the lift forest for tests
+- tests: batch 4, fe-admin — assert state not classes, real rollback, vitest for PeriodFilter and AdminPermissionsPage
+- tests: batch 4, fe-funnel — funnel states by i18n key, literal expectations, no storage-key or filter-count checks
+- docs: the test baseline after batch 3, and what the font test checks
+- tests: batch 3, integration — the archive's fake answers the heal's trace (#411)
+- tests: batch 3, ci-bot-scheduler — run the gates, the deploy and the bot, not their source
+- tests: batch 3, recon-chains — the holds, the pages and the columns by what the jobs do
+- tests: batch 3, goals-backups — the goal writer's transaction, the history's clock and sources, and the backup scripts by what they do
+- tests: batch 3, integration — a helper nobody uses, and a test that left rows behind
+- tests: batch 3, reports-captures — the picture, the report and the capture by what they produce
+- tests: batch 3, tabs-sms-traffic — the public reads, the routes and the rows, not the helpers behind them
+- tests: batch 3, canary-dq — assert the alert, the held page and the finding by what they say and do
+- tests: batch 3, orders-buyers — behaviour instead of source text, mocks and copies
+- tests: batch 3, alerts — what reached Telegram and the ledger, not the plumbing
+- tests: batch 3, access-api — assert the gate, the start and the cache by what they answer
+
+
 ## 3.0.371
 
 - feat(rust): the worker stamps the archive's heal where the daily check reads it

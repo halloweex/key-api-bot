@@ -83,20 +83,10 @@ describe('the last N days', () => {
     },
   )
 
-  it('says so in full words, the year once', async () => {
+  it('says the year once, on the last end', async () => {
     await i18n.changeLanguage('ru')
     const { from, to } = lastDays(91, TODAY)
-    expect(plain(i18n.t('periodControl.resolved', rangeEnds(from, to)))).toBe(
-      '= с 19 июля по 18 октября 2026, включительно',
-    )
-    await i18n.changeLanguage('uk')
-    expect(plain(i18n.t('periodControl.resolved', rangeEnds(from, to)))).toBe(
-      '= з 19 липня по 18 жовтня 2026, включно',
-    )
-    await i18n.changeLanguage('en')
-    expect(plain(i18n.t('periodControl.resolved', rangeEnds(from, to)))).toBe(
-      '= July 19 to October 18, 2026, both included',
-    )
+    expect(rangeEnds(from, to)).toEqual({ from: '19 июля', to: '18 октября 2026' })
   })
 
   it('names the year at both ends when they differ', async () => {

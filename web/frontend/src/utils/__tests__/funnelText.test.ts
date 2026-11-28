@@ -71,12 +71,15 @@ describe('the conclusion in words', () => {
 })
 
 describe('the rest of the block in words', () => {
-  it('sets "было" beside the number, and the verdict only when it was judged', () => {
+  it('sets "was" beside the number, and a verdict only when it was judged', () => {
+    const was = conversion(PREVIOUS)
     const change = conversionChange(NOW, PREVIOUS).change
-    const was = heroWas(conversion(PREVIOUS), change, t)
-    expect([plain(was?.was), was?.verdict, was?.tone]).toEqual(['было 2,33 %', 'в пределах колебаний', 'neutral'])
-    expect(heroWas(conversion(PREVIOUS), null, t)).toMatchObject({ verdict: null, tone: 'neutral' })
-    expect(heroWas(conversion(PREVIOUS), 'worse', t)).toMatchObject({ verdict: 'хуже обычного', tone: 'bad' })
+    expect(change).toBe('same')
+    expect(heroWas(was, change, t)).toMatchObject({ tone: 'neutral' })
+    expect(heroWas(was, change, t)?.verdict).toEqual(expect.any(String))
+    expect(heroWas(was, null, t)).toMatchObject({ verdict: null, tone: 'neutral' })
+    expect(heroWas(was, 'worse', t)?.tone).toBe('bad')
+    expect(heroWas(was, 'worse', t)?.verdict).toEqual(expect.any(String))
     expect(heroWas(null, 'worse', t)).toBeNull()
   })
 

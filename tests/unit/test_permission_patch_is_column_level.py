@@ -9,18 +9,12 @@ The matrix is `app.role_permissions`, the only store the router knows since
 step 14's S14-08 (these ran on DuckDB until then;
 `tests/integration/pg_sms_seed.py`); skipped without `KS_PG_DSN`.
 """
-import re
-from pathlib import Path
-
 import pytest
 import pytest_asyncio
 
 from tests.integration import pg_sms_seed
 from tests.helpers.app_client import signed_in
 from tests.integration.pg_sms_seed import ACCESS_TABLES, as_tuple, pg_conn
-
-REPO = Path(__file__).resolve().parents[2]
-
 
 @pytest_asyncio.fixture(autouse=True)
 async def _postgres(request, monkeypatch):
@@ -77,14 +71,6 @@ async def test_the_route_writes_only_the_flag_it_was_given():
         none = await admin.patch("/api/admin/permissions", params=cell)
         assert none.status_code == 400
         assert await _cell(None, "editor", "expenses") == (True, True, True)
-
-
-def test_the_page_sends_only_what_the_click_changed():
-    page = (REPO / "web/frontend/src/components/AdminPermissionsPage.tsx").read_text()
-    client = (REPO / "web/frontend/src/api/client.ts").read_text()
-    assert "updatedPerms[key] !== currentPerms[key]" in page
-    assert re.search(r"return refetched", page), "the invalidate promise must be awaited"
-    assert "can_view=${canView}" not in client, "the client no longer sends all three"
 
 
 @pytest.mark.asyncio
