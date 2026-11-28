@@ -366,6 +366,23 @@ class TestTheMassDeleteGuard:
         assert (await _stamp(pool))["failures_since_ok"] == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("gone,refused", [(52, False), (53, True)])
+    async def test_a_big_catalogue_is_allowed_one_percent(self, stores, gone, refused):
+        """Over 5 000 live products the limit is 1 %, not the flat 50: with
+        5 200 held, 52 retirements pass and 53 are refused."""
+        store, pool, _env = stores
+        payload = await _seed(store, 5200)
+        keep = 5200 - gone
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.products WHERE id > $1", keep)
+
+        await store.upsert_products(payload[:keep])
+
+        tombs = [v for v in await _versions(pool) if v["is_deleted"]]
+        assert len(tombs) == (0 if refused else gone)
+        assert (await _stamp(pool))["failures_since_ok"] == (1 if refused else 0)
+
+    @pytest.mark.asyncio
     async def test_guard_false_is_the_lever_for_a_confirmed_retirement(self, stores):
         store, pool, _env = stores
         payload = await _seed(store, 120)

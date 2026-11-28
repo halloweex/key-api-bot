@@ -596,17 +596,17 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-28, after batches 4 and 5 of the test rewrite (the
-review of 2026-11-18), with the store up: 9 398 passed, 62 skipped** — measured
-in Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
+**Baseline as of 2026-11-28, after the test rewrite (the review of
+2026-11-18: its five batches and the brittle tests left outside its lists),
+with the store up: 9 370 passed, 62 skipped** — measured in Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
 Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (25), the Rust pilot's
 service (18, which `.github/workflows/rust-pilot.yml` runs), the Rust
 worker's K1 harness (11, which `rust/harness/k1-ch-sync.sh` runs), "root lists
 a directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
 lowers the passing count is a regression until explained; a batch of the
 rewrite explains its own drop, since it replaces brittle tests with fewer
-behavioural ones. (It was 9 406 passed and 60 skipped that morning, after
-batch 3, and 9 404 once batch 4 deleted two tests that read the frontend's
+behavioural ones. (It was 9 400 passed after batch 5 and #416; 9 406 passed
+and 60 skipped that morning, after batch 3, and 9 404 once batch 4 deleted two tests that read the frontend's
 source; 9 407 passed and 55 skipped on 2026-11-27, before batch 3; 9 341 then,
 after batch 2, and 9 470 just before that; 9 221 on
 2026-11-23, after batches 0 and 1; 9 378 on 2026-11-19, with revision 0039;

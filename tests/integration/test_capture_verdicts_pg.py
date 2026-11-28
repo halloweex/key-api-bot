@@ -298,6 +298,24 @@ class TestTheIncrementalParse:
 
         assert [r["change_kind"] for r in await log(conn)] == ["first"]
 
+    @pytest.mark.asyncio
+    async def test_a_parse_that_raises_logs_nothing_and_the_next_one_logs_the_change(self, conn):
+        """A failed parse leaves the table as it was, so the log has nothing
+        to add; the next parse that commits is diffed against the log as it
+        stands and records the edit once."""
+        await order(conn, 1)
+        await parse.parse_incremental()
+        await order(conn, 1, comment=EDITED, updated_at=UPDATED + timedelta(minutes=5))
+
+        with patch("core.pg_utm_parse.utm_columns", side_effect=RuntimeError("bad comment")):
+            with pytest.raises(RuntimeError):
+                await parse.parse_incremental()
+        assert [r["change_kind"] for r in await log(conn)] == ["first"]
+
+        await parse.parse_incremental()
+
+        assert [r["change_kind"] for r in await log(conn)] == ["first", "change"]
+
 
 # ── the reclassify ────────────────────────────────────────────────────────────
 

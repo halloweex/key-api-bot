@@ -413,36 +413,67 @@ class TestChain4Buyers:
     (DuckDB's column is NOT NULL, so the copy-back could not carry it back),
     and every buyer's phone and email in its contact list."""
 
-    @pytest.fixture
-    def flagged(self, monkeypatch):
-        _watch_only(monkeypatch, "pg_buyers_write")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.watched == ("pg_buyers_write",) and facts.whole is None
-        assert isinstance(facts.buyers, inv.Buyers)
-        assert facts.buyers.latched_at is None
-        assert facts.expenses is None and facts.goals is None
-        read = "\n".join(conn.sql)
-        assert "FROM bronze.buyers" in read and "bronze.buyer_contacts" in read
-        assert "WITH orphans" not in read
-        for other in ("manual_expenses", "stock_movements", "revenue_goals",
-                      "expense_types"):
-            assert other not in read, other
-        assert inv.check_chain_invariants(facts) == []
+    async def test_an_orphan_is_judged_from_the_handover_on(self, monkeypatch):
+        """Chain 4's tables on the test Postgres: a buyer with its contact, a
+        contact whose buyer is not held and a verdict whose buyer is not held.
+        Before the chain's first write (no owner row) none is judged: the
+        verdicts arrive by the hourly replace and the buyers by the per-tick
+        mirror. From the handover on both are one CRITICAL, by the buyer ids.
+        Mutation: read the orphans before the handover, or count only
+        contacts."""
+        from core import pg_buyers_write
+        from core.data_quality import Severity
 
-    @pytest.mark.asyncio
-    async def test_after_the_first_write_it_reads_them_with_the_stamp(self, flagged):
-        _latch("pg_buyers_write")
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.buyers.latched_at == UTC_NOW
-        assert "WITH orphans" in "\n".join(conn.sql)
+        now = datetime.now(timezone.utc)
+
+        async def populate(conn, _pool):
+            await seed(conn, buyers=[(1, "Buyer One", "380960000001")])
+            await conn.executemany(
+                "INSERT INTO bronze.buyer_contacts (buyer_id, contact_type, value)"
+                " VALUES ($1, 'phone', $2)",
+                [(1, "380960000001"), (9, "380960000009")])
+            await conn.execute(
+                "INSERT INTO app.buyer_gender (buyer_id, method, rules_version)"
+                " VALUES (7, 'name', 1)")
+
+        async def orphans(pool):
+            facts = await inv.read_facts(pool=pool)
+            return [(i.severity, i.count, tuple(i.sample_ids))
+                    for i in inv.check_chain_invariants(facts)
+                    if i.check_name == inv.BUYER_ORPHANS]
+
+        owner_keys = [chain_latch.OWNER_PREFIX + t for t in pg_buyers_write.CHAIN_TABLES]
+        monkeypatch.setattr(inv, "watched_chains",
+                            lambda: {"pg_buyers_write": None})
+        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+            async with pool.acquire() as conn:
+                held = await conn.fetch(
+                    "SELECT key, value, updated_at FROM meta.chain_watermarks"
+                    " WHERE key = ANY($1)", owner_keys)
+                await conn.execute(
+                    "DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", owner_keys)
+            try:
+                before = await orphans(pool)
+                async with pool.acquire() as conn:     # the chain's first write
+                    await conn.execute(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, now())", owner_keys[0],
+                        (now - timedelta(days=3)).isoformat())
+                after = await orphans(pool)
+            finally:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", owner_keys)
+                    await conn.executemany(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, $3)", [tuple(r) for r in held])
+                    await conn.execute("DELETE FROM bronze.buyer_contacts")
+                    await conn.execute("DELETE FROM app.buyer_gender")
+
+        assert before == []
+        assert after == [(Severity.CRITICAL, 2, (7, 9))]
 
     @staticmethod
     def _facts(latched_at=None, **kw):

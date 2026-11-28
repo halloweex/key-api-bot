@@ -17,19 +17,13 @@ would be a poor trade on any job and a very poor one on this one, which spent
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.data_quality import DiscrepancyClass
-from core.reconciliation_io import (
-    postgres_orders_in_window,
-    rollup_from_orders,
-)
+from core.reconciliation_io import rollup_from_orders
 from core.scheduler import BackgroundScheduler
 from tests.helpers.dq_journal_pg import pool  # noqa: F401
 from tests.helpers.orders_sync import (
@@ -44,35 +38,6 @@ from tests.integration.pg_tab_seed import needs_postgres
 AS_OF = datetime(2026, 8, 24, 3, 0, tzinfo=timezone.utc)
 START, END = date(2026, 5, 26), date(2026, 8, 24)
 
-def _body(fn):
-    """A function's source with its docstring removed.
-
-    These tests read the extractor's SQL, and prose that *explains* an
-    expression contains the same words as the expression.
-
-    Sliced by line number from the AST, not by `source.replace(fn.__doc__, "")`
-    — **that trick is version-dependent and fails silently.** Python 3.13
-    started dedenting `__doc__`, so from 3.13 on the string no longer matches
-    the indented literal in the source, `replace` finds nothing, and the test
-    compares prose it meant to exclude. It passed on 3.12 here and failed on
-    the 3.14.7 production runs, which is the only reason anyone found out."""
-    source = textwrap.dedent(inspect.getsource(fn))
-    node = ast.parse(source).body[0]
-    first = node.body[0] if node.body else None
-    is_doc = (
-        isinstance(first, ast.Expr)
-        and isinstance(getattr(first, "value", None), ast.Constant)
-        and isinstance(first.value.value, str)
-    )
-    if not is_doc:
-        return source
-    lines = source.splitlines(keepends=True)
-    return "".join(lines[: first.lineno - 1] + lines[first.end_lineno :])
-
-
-PG_SQL = _body(postgres_orders_in_window)
-
-
 def _facts(order_id, **over):
     base = {
         "status_id": 12, "source_id": 1, "manager_id": 4, "buyer_id": 500,
@@ -81,38 +46,6 @@ def _facts(order_id, **over):
     }
     base.update(over)
     return {order_id: base}
-
-
-class TestTheExtractorAsksTheKeyCrmSidesQuestion:
-    """Drift between KeyCRM's side and the store's is drift the comparison
-    invents. Until step 14's S14-12 these held the Postgres extractor to
-    DuckDB's, expression for expression; DuckDB's went with the job's DuckDB
-    arm, and the fragments both carried are pinned here as literals."""
-
-    # The Kyiv date and the source filter are asked of a real server in
-    # `tests/integration/test_postgres_orders_in_window.py`.
-
-    def test_it_honours_the_watermark(self):
-        assert "o.updated_at IS NULL OR o.updated_at <" in PG_SQL
-
-    def test_it_excludes_the_in_flight_ids(self):
-        """KeyCRM's cut is the wider one, so the store's side honours its list."""
-        assert "o.id = ANY($4::bigint[])" in PG_SQL
-
-    def test_line_items_are_aggregated_by_the_one_expression(self):
-        assert "ROUND(SUM(price_sold * quantity), 2) AS amount" in PG_SQL
-
-    def test_it_reads_the_mirror_and_not_the_warehouse(self):
-        assert "bronze.orders" in PG_SQL and "bronze.order_products" in PG_SQL
-        assert "FROM orders o" not in PG_SQL
-
-    def test_it_produces_the_shape_the_rollup_reads(self):
-        """`rollup_from_orders` is the only place a rollup is computed, and it
-        can only be that if every extractor hands it the same dict."""
-        for key in ("status_id", "source_id", "manager_id", "buyer_id",
-                    "grand_total", "order_date", "n_lines", "qty",
-                    "line_amount"):
-            assert f'"{key}":' in PG_SQL
 
 
 class TestItCostsNothing:

@@ -34,17 +34,6 @@ EXPENSE_ID = 990_771
 
 
 class TestTheStatement:
-    def test_it_upserts_on_the_primary_key(self):
-        sql = pg_landing._statement("bronze.categories", ("id", "name", "parent_id"))
-        assert "INSERT INTO bronze.categories (id, name, parent_id)" in sql
-        assert "VALUES ($1, $2, $3)" in sql
-        assert "ON CONFLICT (id) DO UPDATE" in sql
-
-    def test_the_key_is_not_assigned_to_itself(self):
-        sql = pg_landing._statement("bronze.products", ("id", "name"))
-        assert "id = EXCLUDED.id" not in sql
-        assert "name = EXCLUDED.name" in sql
-
     @needs_postgres
     @pytest.mark.asyncio
     async def test_a_row_written_again_carries_the_second_write_s_instant(self):

@@ -77,6 +77,23 @@ async def test_watermark_holds_back_recent_updates(monkeypatch):
     assert set(out) == {1}
 
 
+async def test_an_order_never_updated_passes_the_watermark(monkeypatch):
+    """The watermark holds back orders touched after it; one whose
+    `updated_at` is NULL was never touched since it landed and is compared.
+    Mutation: compare `updated_at < watermark` alone and order 4 vanishes."""
+    async def populate(conn, pool):
+        await _populate(conn, pool)
+        await seed(conn, orders=[(4, 1, 12, 20.00,
+                                  datetime(2026, 6, 13, 9, tzinfo=timezone.utc),
+                                  903, 4, None)])
+        await conn.execute("UPDATE bronze.orders SET updated_at = NULL WHERE id = 4")
+
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        out = await _extract(pool, watermark=datetime(2026, 6, 10, 12, tzinfo=timezone.utc))
+
+    assert set(out) == {1, 4}
+
+
 # ─── What KeyCRM's side asks, asked of the store's ──────────────────────────
 #
 # KeyCRM's side files an order under its Kyiv date and keeps the sources this
