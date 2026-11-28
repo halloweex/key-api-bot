@@ -5,13 +5,21 @@ comparison. The watchdog that judges this lives in the *other* container
 (bot/canary.py), which is the whole point — a container cannot be the witness
 to its own silence.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
+import asyncpg
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from tests.helpers.app_client import ConnectionPerAcquire
+from tests.integration.pg_tab_seed import DSN, needs_postgres
 from web.main import app
 from web.routes.api import health as health_routes
+
+ORDERS = "bronze.orders"
 
 
 @pytest.fixture(autouse=True)
@@ -38,18 +46,70 @@ def client():
     return TestClient(app)
 
 
-class TestTheBlock:
-    def test_it_is_published_when_postgres_answers(self, client, monkeypatch):
-        async def fake(*a, **kw):
-            return {"bronze.orders": {
-                "last_ok_at": "2026-08-29T06:32:12+00:00",
-                "age_seconds": 180, "failures_since_ok": 0, "failing": False,
-            }}
+@pytest_asyncio.fixture
+async def orders_watermark():
+    """Writes `bronze.orders`' row of meta.mirror_state; whatever stood there
+    before is put back after the test."""
+    conn = await asyncpg.connect(DSN)
+    try:
+        kept = await conn.fetchrow(
+            "SELECT * FROM meta.mirror_state WHERE table_name = $1", ORDERS)
+    finally:
+        await conn.close()
 
-        monkeypatch.setattr(health_routes, "_mirror_freshness", fake)
-        body = client.get("/api/health").json()
-        assert body["mirrors"]["bronze.orders"]["age_seconds"] == 180
-        assert body["mirrors"]["bronze.orders"]["failing"] is False
+    async def write(*, ok_ago_s: int, failures: int, error) -> None:
+        now = datetime.now(timezone.utc)
+        ok_at = now - timedelta(seconds=ok_ago_s)
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = $1", ORDERS)
+            await conn.execute(
+                "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at,"
+                " failures_since_ok, last_error) VALUES ($1, $2, $3, $4, $5)",
+                ORDERS, now - timedelta(seconds=60) if failures else ok_at, ok_at,
+                failures, error)
+        finally:
+            await conn.close()
+
+    yield write
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = $1", ORDERS)
+        if kept is not None:
+            columns = list(kept.keys())
+            await conn.execute(
+                f"INSERT INTO meta.mirror_state ({', '.join(columns)}) VALUES "
+                f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})",
+                *kept.values())
+    finally:
+        await conn.close()
+
+
+class TestTheBlock:
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ok_ago_s, failures, error, failing", [
+        pytest.param(180, 0, None, False, id="shipped three minutes ago"),
+        # The canary pages on `failing` at the next sync tick, whatever the
+        # age; the driver's text carries a DSN and stays out of the body.
+        pytest.param(1800, 2, "InvalidPasswordError: password authentication failed",
+                     True, id="two failures since the last shipment"),
+    ])
+    async def test_it_is_read_from_the_orders_watermark(
+            self, orders_watermark, monkeypatch, ok_ago_s, failures, error, failing):
+        await orders_watermark(ok_ago_s=ok_ago_s, failures=failures, error=error)
+        monkeypatch.setattr(health_routes, "_mirror_cache_lock", asyncio.Lock())
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))):
+            response = await asyncio.to_thread(TestClient(app).get, "/api/health")
+
+        assert response.status_code == 200
+        entry = response.json()["mirrors"][ORDERS]
+        assert ok_ago_s <= entry["age_seconds"] <= ok_ago_s + 60
+        assert entry["failures_since_ok"] == failures
+        assert entry["failing"] is failing
+        if error:
+            assert error not in response.text
 
     def test_unreadable_is_null_and_never_an_empty_object(self, client, monkeypatch):
         """`{}` would read to the canary as 'asked, nothing watched'; null is

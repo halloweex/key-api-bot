@@ -1,9 +1,10 @@
 """Tests for bot/canary.py — health probe, cert expiry, state machine."""
 from __future__ import annotations
 
-import pathlib
+import html
+import re
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -436,42 +437,65 @@ async def test_run_canary_unreachable_does_not_add_dq_noise():
 # something the all-or-nothing transition never could.
 
 
-def test_format_alert_includes_failures_and_extras():
+# Telegram's HTML parse mode: these tags, and `<`, `>` and `&` nowhere else
+# but inside an entity. Anything else is a 400 "can't parse entities".
+_TELEGRAM_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+                  "span", "tg-spoiler", "a", "tg-emoji", "code", "pre",
+                  "blockquote"}
+_BARE_AMPERSAND = re.compile(r"&(?!(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);)")
+
+
+def _telegram_text(message: str) -> str:
+    """What the reader sees of `message`, read the way Telegram's HTML mode
+    reads it; fails the test on anything Telegram would refuse."""
+    text, open_tags = [], []
+    for token in re.split(r"(<[^<>]*>)", message):
+        tag = re.fullmatch(r"<(/?)([a-z-]+)(?:\s[^<>]*)?>", token)
+        if tag:
+            closing, name = tag.groups()
+            assert name in _TELEGRAM_TAGS, f"Telegram knows no <{name}>"
+            if closing:
+                assert open_tags and open_tags.pop() == name, f"unbalanced </{name}>"
+            else:
+                open_tags.append(name)
+            continue
+        assert "<" not in token and ">" not in token, f"unescaped markup in {token!r}"
+        assert not _BARE_AMPERSAND.search(token), f"bare & in {token!r}"
+        text.append(html.unescape(token))
+    assert not open_tags, f"unclosed {open_tags}"
+    return "".join(text)
+
+
+def test_a_failure_reaches_the_reader_whatever_it_carries():
+    """The incident: the certificate line carries a literal `(<14)`, and under
+    parse_mode=HTML an unescaped `<` is a Telegram 400 — the certificate
+    alert, the one the canary was written for, went undelivered for months.
+    An httpx exception's text can carry anything."""
+    failures = ["cert expires in 5d (<14)",
+                "health: <ConnectError [Errno 111]> & retried <b>"]
     result = canary.CanaryResult(
-        ok=False, severity="critical",
-        failures=["status=degraded", "cert expires in 5d (<14)"],
-        http_code=200, health_status="degraded", cert_days_remaining=5,
-        sync_seconds_since=120,
-    )
-    msg = canary.format_alert(result, DASHBOARD)
-    assert "Dashboard DOWN" in msg
-    # Ссылку из тела убрали правкой владельца 30.08 («коротко»): у обоих
-    # админов дашборд в закладках, а URL в каждом алерте — шум.
-    assert "status=degraded" in msg
-    assert "cert expires in 5d" in msg
-    assert "cert 5d" in msg
-    # sync-возраст из тела убран тем же коротким форматом — он в /api/health
+        ok=False, severity="critical", failures=failures,
+        failure_keys=["cert_expiring", "health_unreachable"],
+        http_code=200, cert_days_remaining=5)
+    text = _telegram_text(canary.format_alert(result, DASHBOARD))
+    for failure in failures:
+        assert failure in text
 
 
-@pytest.mark.parametrize("keys, title", [
-    (["health_unreachable"], "Dashboard DOWN"),
-    (["health_http"], "Dashboard DOWN"),
-    (["health_status"], "Dashboard DOWN"),
-    ([], "Dashboard DOWN"),
-    (["cert_expiring"], "Dashboard critical"),
-    (["orders_sync_failing"], "Dashboard critical"),
-    (["cert_expiring", "health_status"], "Dashboard DOWN"),
+@pytest.mark.parametrize("severity, keys, title", [
+    ("warn", ["health_status"], "Dashboard warning"),
+    ("critical", ["health_http"], "Dashboard DOWN"),
+    ("critical", [], "Dashboard DOWN"),          # no keys: read as an outage
+    ("critical", ["cert_expiring"], "Dashboard critical"),
+    ("critical", ["cert_expiring", "health_status"], "Dashboard DOWN"),
 ])
-def test_a_critical_title_says_down_only_for_an_outage(keys, title):
-    result = canary.CanaryResult(ok=False, severity="critical",
-                                 failures=["x"] * max(len(keys), 1), failure_keys=keys)
-    assert canary.format_alert(result, DASHBOARD).splitlines()[0].endswith(f"<b>{title}</b>")
-
-
-def test_a_warning_is_titled_a_warning():
-    result = canary.CanaryResult(ok=False, severity="warn", failures=["x"],
-                                 failure_keys=["health_status"])
-    assert "Dashboard warning" in canary.format_alert(result, DASHBOARD)
+def test_the_title_says_down_only_for_an_outage(severity, keys, title):
+    """A certificate about to expire is a site that serves: titled DOWN, it
+    sends the reader to the wrong lever first."""
+    result = canary.CanaryResult(ok=False, severity=severity, failures=["x"],
+                                 failure_keys=keys)
+    first_line = _telegram_text(canary.format_alert(result, DASHBOARD)).splitlines()[0]
+    assert first_line.endswith(title)
 
 
 def test_format_alert_includes_dq_ages():

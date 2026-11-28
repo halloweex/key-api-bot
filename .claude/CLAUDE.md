@@ -596,15 +596,17 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-27, after batch 2 of the test rewrite (the review
-of 2026-11-18), with the store up: 9 341 passed, 44 skipped** — measured in
+**Baseline as of 2026-11-28, after batch 3 of the test rewrite (the review
+of 2026-11-18), with the store up: 9 406 passed, 60 skipped** — measured in
 Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
-Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (18), the Rust pilot's
-service (18, which `.github/workflows/rust-pilot.yml` runs), "root lists a
-directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
+Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (23), the Rust pilot's
+service (18, which `.github/workflows/rust-pilot.yml` runs), the Rust
+worker's K1 harness (11, which `rust/harness/k1-ch-sync.sh` runs), "root lists
+a directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
 lowers the passing count is a regression until explained; a batch of the
 rewrite explains its own drop, since it replaces brittle tests with fewer
-behavioural ones. (It was 9 470 just before it, on 2026-11-27; 9 221 on
+behavioural ones. (It was 9 407 passed and 55 skipped just before it, on
+2026-11-27; 9 341 then, after batch 2, and 9 470 just before that; 9 221 on
 2026-11-23, after batches 0 and 1; 9 378 on 2026-11-19, with revision 0039;
 9 045 on 2026-11-18, after the cleanup that deleted 1 300 tombstone cases —
 tests guarding the finished DuckDB exit — 10 344 just before it, 9 288 on
@@ -2116,8 +2118,8 @@ draws a missing glyph as `.notdef` in silence, so `_text`/`_len` split a
 string on `brand.FALLBACK_CHARS` and draw those characters from DejaVu at
 the same size; where DejaVu *is* the primary face the run is the same file
 and the output is identical, which is why it is unconditional rather than a
-branch. `tests/unit/test_brand_fonts.py` computes the gap from the shipped
-files and fails if `FALLBACK_CHARS` drifts either way. The brand book itself
+branch. `tests/unit/test_brand_fonts.py` reads the shipped files and fails
+if any character a picture draws lands in a face without its glyph. The brand book itself
 is outside the repo; see the memory note `reference_brand_book`.
 
 **The shop bot's voice rules apply to what the report says**, where they
@@ -4550,4 +4552,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-27 (batch 2 of the test rewrite: the baseline and three references to tests it replaced; 2026-11-25: K0, who executes a scheduler job, Python or Rust, and a lease in Postgres that keeps each job to one process; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
+*Last updated: 2026-11-28 (batch 3 of the test rewrite: the baseline and the sentence on what the font test checks; 2026-11-27: batch 2 of the test rewrite: the baseline and three references to tests it replaced; 2026-11-25: K0, who executes a scheduler job, Python or Rust, and a lease in Postgres that keeps each job to one process; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*

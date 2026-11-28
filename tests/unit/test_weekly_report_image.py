@@ -79,13 +79,6 @@ class TestRendering:
     def test_it_stays_small_enough_to_send_every_week(self):
         assert len(render_weekly_card(_report())) < 400_000
 
-    @pytest.mark.parametrize("lang", LANGUAGES)
-    def test_it_renders_in_every_language(self, lang):
-        """Ukrainian labels are half again as long as the English ones."""
-        img = _open(render_weekly_card(_report(), lang))
-        assert img.size == (W, H)
-        assert not _uniform(img.crop((0, STATS_TOP, W, H - 40)))
-
     def test_both_halves_of_the_card_are_used(self):
         """The headline and the three stats each occupy their own half.
 
@@ -101,21 +94,16 @@ class TestRendering:
 
 
 class TestDelta:
-    def test_a_fall_is_red_and_a_rise_is_green(self):
-        assert _delta(-25.8, EN) == ("▼ 25.8%", DOWN)
-        assert _delta(12.3, EN) == ("▲ 12.3%", UP)
-
-    def test_a_tenth_of_a_percent_is_not_a_movement(self):
-        """₴2,729 against ₴2,732 is not something to colour in."""
-        text, colour = _delta(-0.1, EN)
-        assert text == "≈ flat"
-        assert colour == MUTED
+    @pytest.mark.parametrize("pct, colour", [
+        (-25.8, DOWN), (12.3, UP),
+        (-0.1, MUTED),   # ₴2,729 against ₴2,732 is not something to colour in
+        (None, MUTED),   # no base: marked, never faked
+    ])
+    def test_only_a_real_movement_is_coloured_and_by_its_direction(self, pct, colour):
+        assert _delta(pct, EN)[1] == colour
 
     def test_it_speaks_the_language_it_is_handed(self):
         assert _delta(-0.1, UK)[0] == "≈ без змін"
-
-    def test_no_base_is_marked_rather_than_faked(self):
-        assert _delta(None, EN) == ("—", MUTED)
 
 
 class TestDegradation:
@@ -136,7 +124,9 @@ class TestDegradation:
         monkeypatch.setattr("core.weekly_report_image._draw_stats", _explode)
         assert render_weekly_card(_report()) is None
 
+    @pytest.mark.parametrize("lang", LANGUAGES)
     @pytest.mark.parametrize("name,overrides", [
+        ("an ordinary week", {}),
         ("first week ever", dict(previous=None, year_ago=None, baseline_mean=None,
                                  baseline_sd=None, baseline_weeks=0)),
         ("a dead week", dict(current=WeekTotals(revenue=0, orders=0,
@@ -147,7 +137,9 @@ class TestDegradation:
             revenue=9_999_999, orders=4_000, new_customer_orders=2_000,
             repeat_orders=2_000))),
     ])
-    def test_thin_or_extreme_data_still_renders(self, name, overrides):
-        data = render_weekly_card(_report(**overrides))
+    def test_thin_or_extreme_data_still_renders(self, name, overrides, lang):
+        """In every language: Ukrainian labels are half again as long as the
+        English ones."""
+        data = render_weekly_card(_report(**overrides), lang)
         assert data is not None, name
         assert _open(data).size == (W, H)

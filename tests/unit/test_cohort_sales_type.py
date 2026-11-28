@@ -21,12 +21,13 @@ list rendered into SQL has to be rendered three ways, a column does not.
 """
 from __future__ import annotations
 
-import ast
-import inspect
+import os
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from core.repositories import customers as module
+from tests.integration.pg_tab_seed import needs_postgres
 
 BODIES = (
     "cohort_retention_select",
@@ -36,47 +37,102 @@ BODIES = (
     "at_risk_customers_select",
 )
 
-FIVE = (
-    "get_cohort_retention",
-    "get_enhanced_cohort_retention",
-    "get_days_to_second_purchase",
-    "get_cohort_ltv",
-    "get_at_risk_customers",
+needs_clickhouse = pytest.mark.skipif(
+    not os.getenv("KS_CH_URL"), reason="needs a live ClickHouse at KS_CH_URL",
 )
 
 
-def _statements(name: str) -> str:
-    """One method's source with its `--` and `#` commentary removed.
-
-    Parsed and stripped rather than grepped: every one of these methods now
-    *explains* the old rule in a comment, and a grep for the constant would be
-    satisfied by the explanation — [[feedback_assert_on_structure_not_prose]],
-    which this repository has now paid for three times in one day.
-    """
-    src = inspect.getsource(module)
-    tree = ast.parse(src)
-    lines = src.splitlines()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
-            body = lines[node.lineno - 1:node.end_lineno]
-            return "\n".join(
-                line.split("--")[0].split("#")[0] for line in body
-            )
-    raise AssertionError(f"{name} not found")
+def _first_of_the_month_before_last() -> date:
+    """Inside every window the five read, on any day the suite runs."""
+    today = datetime.now(ZoneInfo("Europe/Kyiv")).date()
+    year, month = (today.year, today.month - 2) if today.month > 2 else (
+        today.year - 1, today.month + 10)
+    return date(year, month, 1)
 
 
-@pytest.mark.parametrize("name", FIVE)
-def test_it_reads_the_column_silver_materialised(name):
-    code = _statements(name)
-    assert "o.sales_type" in code, f"{name} does not filter on the Silver column"
+# (id, buyer, day of the month, sales_type, manager_id, source_id). Every
+# first order falls in one month, so each sales type is one cohort. Silver's
+# column decides the sales type; the managers are the ones the old manager
+# rule read the other way: buyer 11 is retail with no manager on Instagram
+# (it required source 4), buyer 12 retail under a manager a human classified
+# (34, on no constant list), and the internal orders sit under managers the
+# constant list calls retail.
+ORDERS = [
+    (101, 11, 2, "retail", None, 1),
+    (102, 11, 12, "retail", None, 1),     # buyer 11 comes back, retail
+    (103, 12, 4, "retail", 34, 2),
+    (104, 13, 3, "b2b", 15, 1),
+    (105, 13, 23, "b2b", 15, 1),          # buyer 13 comes back, b2b
+    (106, 14, 5, "internal", 4, 1),
+    (107, 15, 6, "offline", 99, 7),
+    (108, 12, 8, "internal", 4, 1),       # buyer 12 again, internal
+    (109, 17, 9, "internal", 8, 1),
+]
+
+# (customers in the cohort, customers who came back) per sales type: `all`
+# is every buyer once, not the sum of the types (buyer 12 is in two), and
+# buyer 12's internal order is a second purchase only there.
+EXPECTED = {
+    "retail": (2, 1),
+    "b2b": (1, 1),
+    "internal": (3, 0),
+    "offline": (1, 0),
+    "all": (6, 3),
+}
 
 
-@pytest.mark.parametrize("name", FIVE)
-def test_all_still_means_no_filter(name):
-    """`sales_type=all` spans every category, including `internal`, and must
-    not quietly become a predicate."""
-    code = _statements(name)
-    assert 'if sales_type == "all"' in code or '"" if sales_type == "all"' in code
+async def _seed_clickhouse() -> None:
+    """`silver.orders` by the shipper's own DDL, so the types are production's."""
+    from core.ch_common import execute
+    from core.ch_silver import _SILVER_DDL
+
+    month = _first_of_the_month_before_last()
+    await execute("CREATE DATABASE IF NOT EXISTS silver")
+    await execute("DROP TABLE IF EXISTS silver.orders")
+    await execute(_SILVER_DDL.format(name="silver.orders"))
+    values = ", ".join(
+        f"({oid}, {buyer}, toDate('{month + timedelta(days=day - 1)}'), false,"
+        f" '{stype}', 1000, {source}, true,"
+        f" {'NULL' if manager is None else manager})"
+        for oid, buyer, day, stype, manager, source in ORDERS)
+    await execute("INSERT INTO silver.orders (id, buyer_id, order_date, is_return,"
+                  " sales_type, grand_total, source_id, is_active_source, manager_id)"
+                  f" VALUES {values}")
+
+
+@needs_clickhouse
+@needs_postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sales_type", sorted(EXPECTED))
+async def test_each_tab_reads_the_sales_type_silver_materialised(sales_type):
+    """The five cohort routes, as the tab asks them, over one ClickHouse
+    `silver.orders`: each sales type is the orders Silver gave it, and `all`
+    is no filter at all. Mutations: filter by the manager rule again — retail
+    reads the internal buyers; or let `all` become a predicate — it reads
+    one type."""
+    from core.ch_common import execute
+    from tests.helpers.app_client import signed_in
+
+    size, came_back = EXPECTED[sales_type]
+    await _seed_clickhouse()
+    try:
+        async with signed_in("admin") as admin:
+            params = {"sales_type": sales_type}
+            plain = await admin.get("/api/customers/cohort-retention",
+                                    params={**params, "include_revenue": "false"})
+            enhanced = await admin.get("/api/customers/cohort-retention", params=params)
+            timing = await admin.get("/api/customers/purchase-timing", params=params)
+            ltv = await admin.get("/api/customers/cohort-ltv", params=params)
+            at_risk = await admin.get("/api/customers/at-risk", params=params)
+        for r in (plain, enhanced, timing, ltv, at_risk):
+            assert r.status_code == 200, r.text
+        assert [c["size"] for c in plain.json()["cohorts"]] == [size]
+        assert [c["size"] for c in enhanced.json()["cohorts"]] == [size]
+        assert [c["customerCount"] for c in ltv.json()["cohorts"]] == [size]
+        assert at_risk.json()["summary"]["totalCustomers"] == size
+        assert timing.json()["summary"]["totalRepeatCustomers"] == came_back
+    finally:
+        await execute("DROP TABLE IF EXISTS silver.orders")
 
 
 class TestTheOneSpellingThatCannotBeShared:

@@ -1,5 +1,6 @@
 """A sale to the company's own legal entity is revenue nowhere (the owner's
-decision of 2026-11-14), judged without a database.
+decision of 2026-11-14), judged without a database but for one predicate,
+run on the test Postgres.
 
 The orders whose buyer is the company's second legal entity are goods moved
 between our own two entities. They stay in Silver — the shipment is real —
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import re
 from datetime import date
 from pathlib import Path
@@ -30,6 +32,7 @@ from core.duckdb_constants import (
 )
 from core.sql_dialect import POSTGRES
 from tests.helpers.own_entity import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
+from tests.integration.pg_tab_seed import needs_postgres
 
 ROOT = Path(__file__).resolve().parents[2]
 OWN = OWN_ENTITY_BUYER_IDS[0]
@@ -63,9 +66,24 @@ class TestThePredicate:
         assert not_own_entity("s") == "(s.buyer_id IS NULL OR s.buyer_id NOT IN (17358))"
         assert not_own_entity("l", (5, 7)) == "(l.buyer_id IS NULL OR l.buyer_id NOT IN (5, 7))"
 
-    def test_no_ids_is_true_never_an_empty_list(self):
-        """`NOT IN ()` parses in no engine here."""
-        assert not_own_entity("o", ()) == "TRUE"
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_no_ids_still_runs_and_keeps_every_order(self):
+        """Executed on Postgres: with no ids listed the predicate is still SQL
+        the engine runs (`NOT IN ()` parses in none here) and keeps every
+        order, with a buyer or without, the entity's card included."""
+        import asyncpg
+
+        conn = await asyncpg.connect(os.environ["KS_PG_DSN"])
+        try:
+            rows = await conn.fetch(
+                f"SELECT o.buyer_id, {not_own_entity('o', ())} AS kept "
+                f"FROM (VALUES (NULL::int), (1), ({OWN})) AS o (buyer_id) "
+                "ORDER BY o.buyer_id NULLS FIRST")
+        finally:
+            await conn.close()
+        assert [(r["buyer_id"], r["kept"]) for r in rows] == [
+            (None, True), (1, True), (OWN, True)]
 
     def test_it_reads_the_constant_at_call_time(self, monkeypatch):
         monkeypatch.setattr(constants, "OWN_ENTITY_BUYER_IDS", (11, 12))

@@ -16,6 +16,9 @@ from core.alert_escalator import (
     escalate_due,
     format_escalation,
 )
+from tests.helpers.alerts_journal_pg import alert_ledger
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 def _due(key="mirror_failing", hours=7, fired=3):
@@ -70,27 +73,32 @@ class TestPolicy:
         assert sorted(rec.await_args.args[0]) == [
             "disk:CRITICAL", "mirror_failing"]
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_recorded_before_delivery_whatever_its_outcome(self, monkeypatch):
         """The escalated event is what stops the next 15-minute tick from
-        re-judging the same cycle — a kill-switched dev instance must not
-        retry forever. Written first and awaited, so a slow ledger cannot
-        leave the row missing behind a message that already went."""
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
-        order = []
+        re-judging the same cycle — a send nobody received must not retry
+        forever. Written first and awaited, so a slow ledger cannot leave the
+        row missing behind a message that already went: when the message
+        leaves, the row is there."""
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await ledger.firing("freshness_orders", since=timedelta(hours=7))
+            rows_when_sent = []
 
-        async def _write(keys, message):
-            order.append("write")
-            return list(keys)
+            async def at_send(_payload):
+                rows_when_sent.append(await ledger.count("escalated"))
 
-        async def _send(*a, **kw):
-            order.append("send")
-            return 0
+            telegram.on_send = at_send
+            telegram.status = 403              # every admin refuses
+            assert await escalate_due(web_alive=True) == 0
+            telegram.status = 200              # the next tick, Telegram back
+            assert await escalate_due(web_alive=True) == 0
+            escalated = [e for e in await ledger.events() if e[1] == "escalated"]
 
-        with patch("bot.main.send_admin_message", new=AsyncMock(side_effect=_send)), \
-             patch("core.alert_archive.write_escalated_now", new=AsyncMock(side_effect=_write)):
-            assert await escalate_due(web_alive=True, _due=[_due()]) == 0
-        assert order == ["write", "send"]
+        assert rows_when_sent == [1] * len(ADMINS)
+        assert len(telegram.attempts) == len(ADMINS)  # the second tick tried nobody
+        assert escalated == [("freshness_orders", "escalated", None)]
 
     @pytest.mark.asyncio
     async def test_a_ledger_that_cannot_record_holds_the_escalation(self, monkeypatch):

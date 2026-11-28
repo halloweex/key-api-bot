@@ -158,22 +158,8 @@ def _trend_spy(monkeypatch):
 
 
 class TestTheTrendRoute:
-
-    def test_all_time_reads_no_comparison(self, admin_client, monkeypatch):
-        spy = _trend_spy(monkeypatch)
-        r = admin_client.get("/api/revenue/trend?period=all_time&granularity=monthly"
-                             "&compare_type=year_ago")
-        assert r.status_code == 200, r.text
-        assert spy.await_args.args[0] == HISTORY_START.isoformat()
-        assert spy.await_args.kwargs["include_comparison"] is False
-        assert spy.await_args.kwargs["granularity"] == "monthly"
-
-    def test_any_other_period_still_compares(self, admin_client, monkeypatch):
-        spy = _trend_spy(monkeypatch)
-        r = admin_client.get("/api/revenue/trend?period=month")
-        assert r.status_code == 200, r.text
-        assert spy.await_args.kwargs["include_comparison"] is True
-        assert spy.await_args.kwargs["granularity"] == "daily"
+    """What the trend answers for `all_time` is held over Postgres, in
+    tests/integration/test_period_all_time_pg.py."""
 
     def test_an_unknown_granularity_is_named(self, admin_client, monkeypatch):
         _trend_spy(monkeypatch)

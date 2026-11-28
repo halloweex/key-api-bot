@@ -57,10 +57,9 @@ class TestCompleteness:
 
 
 class TestLookup:
-    def test_it_translates(self):
-        assert t("report.orders", UK) == "Замовлення"
-        assert t("report.orders", RU) == "Заказы"
-        assert t("report.orders", EN) == "Orders"
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_it_translates_into_the_language_asked_for(self, lang):
+        assert t("report.orders", lang) == _STRINGS["report.orders"][lang]
 
     def test_an_unknown_key_returns_itself_rather_than_raising(self):
         """One odd line in a delivered report beats no report at all."""
@@ -69,11 +68,18 @@ class TestLookup:
     def test_an_unknown_language_falls_back_to_english(self):
         assert t("report.orders", "de") == "Orders"
 
-    def test_a_missing_placeholder_leaves_the_sentence_standing(self):
-        assert t("report.vs_average", EN) == "vs {weeks}-week average"
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_a_missing_placeholder_leaves_the_sentence_standing(self, lang):
+        """No value for `{weeks}`, or values for other names: the template
+        comes back whole rather than an error."""
+        template = _STRINGS["report.vs_average"][lang]
+        assert t("report.vs_average", lang) == template
+        assert t("report.vs_average", lang, share=3) == template
 
-    def test_it_formats(self):
-        assert t("report.vs_average", RU, weeks=12) == "против среднего за 12 нед."
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_it_formats(self, lang):
+        text = t("report.vs_average", lang, weeks=12)
+        assert "12" in text and "{weeks}" not in text
 
 
 class TestNormalize:

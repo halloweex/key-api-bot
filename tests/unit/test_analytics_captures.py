@@ -154,8 +154,12 @@ GOALS = "app.revenue_goal_history"
 
 
 def _stamped(conn, *, ok):
-    marker = "last_ok_at        = now()" if ok else "failures_since_ok + 1"
-    return [args for sql, args in conn.sql if "meta.mirror_state" in sql and marker in sql]
+    """The arguments of every ok (or failure) stamp the capture wrote: the
+    mirror's own two statements, whatever their text."""
+    from core.pg_landing import RECORD_FAILURE_SQL, WATERMARK_OK_SQL
+
+    stamp = WATERMARK_OK_SQL if ok else RECORD_FAILURE_SQL
+    return [args for sql, args in conn.sql if sql == stamp]
 
 
 class TestCaptureInTransaction:
@@ -680,25 +684,26 @@ class TestTheNamesAreRegisteredWithALever:
         for name in cap.conditions():
             assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
 
-    def test_the_blindness_is_news_every_morning(self):
-        """The switch off included: every day it stands is a day missing from
-        every history. Kills: it left out, to wait a week to be restated."""
-        from core.data_quality import blindness_names
-
-        assert {cap.UNWATCHED, cap.SWITCHED_OFF} <= blindness_names()
-
-    def test_the_switch_off_alone_reaches_the_digest(self):
-        """Kills: a finding that never produces a message — the INFO it was."""
+    @pytest.mark.parametrize("facts, news", [
+        (cap.Facts(switched_off=True), True),
+        (cap.Facts(unwatched="the stamps could not be read"), True),
+        (_all_ok(**{GOALS: cap.Stamp(NOW, 1, "boom")}), False),
+    ], ids=["switched_off", "unwatched", "a_standing_failure"])
+    def test_a_capture_that_is_not_looking_is_news_every_morning(self, facts, news):
+        """Yesterday's digest said the same, a day ago: a standing failure
+        waits for the weekly restatement, while the switch off or the stamps
+        unread is said again every morning — every day either stands is a day
+        missing from every history. Kills: either left to wait a week, or a
+        finding that never produces a message (the INFO the switch was)."""
         from core.data_quality import DigestSection, build_digest
 
         issues = [{"check_name": i.check_name, "count": i.count,
-                   "severity": i.severity.value}
-                  for i in cap.judge(cap.Facts(switched_off=True))]
+                   "severity": i.severity.value} for i in cap.judge(facts)]
         section = DigestSection(
             layer="integrity", run={"started_at": NOW.isoformat(), "status": "PASS"},
             issues=issues, previous_issues=issues, age_hours=2.0)
-        assert build_digest([section], last_sent_at=NOW - timedelta(days=1),
-                            now=NOW) is not None
+        digest = build_digest([section], last_sent_at=NOW - timedelta(days=1), now=NOW)
+        assert (digest is not None) is news
 
     def test_every_name_reads_as_words(self):
         """The digest prints the label beside the key; a key alone is not

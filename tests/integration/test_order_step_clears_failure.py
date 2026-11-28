@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -135,27 +136,49 @@ class TestTheHealthyTickAfterAFailure:
         assert (await _state(pool))["failures_since_ok"] == 0
 
 
-class TestTheTickAsksIt:
-    def test_the_clear_follows_the_steps_success(self):
-        """By tree: in `incremental_sync`, the `try` that records the order
-        step's success awaits the clear in the same body, after it — so a
-        failure (caught below it) never clears anything."""
-        import ast
-        import inspect
-        import textwrap
-
+class TestTheTickClearsIt:
+    @pytest.mark.asyncio
+    async def test_a_failed_order_step_stands_until_the_next_healthy_tick(
+            self, pool, monkeypatch):
+        """Two ticks of `incremental_sync`, KeyCRM faked at its transport. In
+        the first, the order window holds nothing the parse can read: the
+        order step fails and `bronze.orders` is recorded failing. In the
+        second KeyCRM serves nothing and the tick clears it. Every other step
+        ran a minute ago by its watermark and is not due. Mutations: drop the
+        clear (the row stays failing), or clear whatever the step did (the
+        first tick leaves nothing recorded)."""
+        from core.store import AnalyticsStore
         from core.sync_service import SyncService
+        from tests.helpers.orders_sync import (
+            keycrm_serving_orders, listing_window, order_payload, orders_in_postgres)
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(SyncService.incremental_sync)))
+        now = datetime.now(timezone.utc)
+        unreadable = order_payload(IDS[0], created=now - timedelta(minutes=5))
+        unreadable["products"][0]["price_sold"] = None
+        serving = {"unreadable": True}
 
-        def names(stmts):
-            return [n.func.attr for st in stmts for n in ast.walk(st)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+        def answer(request):
+            if (serving["unreadable"] and listing_window(request) is not None
+                    and request.url.params.get("page") == "1"):
+                return httpx.Response(200, json={"data": [unreadable]})
+            return None
 
-        bodies = [names(t.body) for t in ast.walk(tree) if isinstance(t, ast.Try)
-                  and not any(isinstance(n, ast.Try) for st in t.body for n in ast.walk(st))
-                  and "succeeded" in names(t.body) and "_orders_step" in names(t.body)]
-        assert len(bodies) == 1
-        body = bodies[0]
-        assert "_clear_orders_failure" in body
-        assert body.index("_clear_orders_failure") > body.index("succeeded")
+        async with orders_in_postgres(DSN):
+            keycrm_serving_orders(monkeypatch, [], answer=answer)
+            store = AnalyticsStore()
+            for step in ("products", "managers", "buyers", "offers", "stocks"):
+                await store.set_last_sync_time(step)
+            await store.set_last_sync_time("orders", now - timedelta(minutes=10))
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM meta.mirror_state WHERE table_name = $1", ORDERS_TABLE)
+
+            await SyncService(store).incremental_sync()
+            failed = await _state(pool)
+
+            serving["unreadable"] = False
+            await SyncService(store).incremental_sync()
+            cleared = await _state(pool)
+
+        assert failed["failures_since_ok"] == 1
+        assert (cleared["failures_since_ok"], cleared["last_error"]) == (0, None)

@@ -396,6 +396,22 @@ class TestTheMassDeleteGuard:
         assert (await _stamp(pool))["failures_since_ok"] == 0
 
 
+class _HashesSpoiledBeforeTheSelfCheck:
+    """The capture's connection, except that every stored version's hash has
+    a bit flipped, in the capture's own transaction, just before the
+    self-check reads — versions written with a hash that is not their row's."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def fetchrow(self, sql, *args):
+        await self._conn.execute(f"UPDATE {TABLE} SET row_hash = row_hash # 1")
+        return await self._conn.fetchrow(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 class TestTheSelfCheck:
     @pytest.mark.asyncio
     async def test_a_history_that_disagrees_with_bronze_is_refused(self, stores):
@@ -418,10 +434,17 @@ class TestTheSelfCheck:
 
     @pytest.mark.asyncio
     async def test_a_hash_that_is_not_its_rows_is_refused(self, stores, monkeypatch):
+        """The run's versions land with a hash that is not their row's (one
+        bit flipped, in the run's own transaction, just before the
+        self-check reads): the whole run is refused, nothing kept."""
         store, pool, _env = stores
+        real = chain._capture_versions
+
+        async def with_spoiled_hashes(conn, **kw):
+            return await real(_HashesSpoiledBeforeTheSelfCheck(conn), **kw)
+
+        monkeypatch.setattr(chain, "_capture_versions", with_spoiled_hashes)
         refused = _refusals(monkeypatch)
-        monkeypatch.setattr(chain, "_VERSION_INSERT_SQL",
-                            chain._VERSION_INSERT_SQL.replace("$6", "($6::bigint # 1)"))
         await store.upsert_products(PAYLOAD)
 
         assert await _versions(pool) == []

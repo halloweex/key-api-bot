@@ -247,6 +247,8 @@ def _store(tmp_path: Path):
 
 from unittest.mock import AsyncMock, patch
 
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
+
 
 class TestSchedulerJob:
     @pytest.mark.asyncio
@@ -386,38 +388,23 @@ class TestSchedulerJob:
         assert "Disk" in msg and "92" in msg
 
     @pytest.mark.asyncio
-    async def test_repeated_breach_throttled(self, tmp_path):
-        """A persistent breach must not page admins every 6h."""
+    async def test_repeated_breach_throttled(self, monkeypatch):
+        """A persistent breach must not page admins on every pass: the
+        second pass at 92% finds the first one's page delivered."""
         from core.scheduler import BackgroundScheduler
 
-        store = _store(tmp_path)
-        # Pretend we alerted 1 minute ago
-        # A delivery 60s ago, recorded where the policy now lives: the Gate.
-        # Both halves of what `raise_alert` records on a delivery: the
-        # bucket's cooldown and the condition's delivered-notice. Seeding
-        # only the first describes a condition that has since been
-        # announced resolved — and a resolved condition coming back is
-        # news, which is the Gate working, not a throttle failing.
-        from core.alerting import _gate
-        for bucket in ("disk:WARN", "disk:CRITICAL"):
-            _gate.decide(bucket, has_condition=True, conditions=[bucket])
-            _gate.record_delivery(bucket)
-            _gate.note_delivered_conditions([bucket], "disk")
-
+        monkeypatch.delenv("KS_PG_DSN", raising=False)  # no archive: not this test's subject
+        telegram = telegram_at_the_transport(monkeypatch)
         scheduler = BackgroundScheduler()
-        with patch(
-            "core.disk_monitor.sample_disk_state",
-            return_value={
-                "sampled_at": datetime.now(timezone.utc),
-                "db_size_mb": 2_480, "disk_pct_used": 92.0,
-                "disk_free_gb": 6.0,
-            },
-        ), patch("core.store.get_store", AsyncMock(return_value=store)), \
-           patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
-            result = await scheduler._run_disk_watchdog()
+        with patch("core.disk_monitor.sample_disk_state", return_value={
+            "sampled_at": datetime.now(timezone.utc),
+            "db_size_mb": 0.0, "disk_pct_used": 92.0, "disk_free_gb": 6.0,
+        }):
+            first = await scheduler._run_disk_watchdog()
+            second = await scheduler._run_disk_watchdog()
 
-        assert result["alert_fired"] is False
-        send.assert_not_called()  # throttled
+        assert (first["alert_fired"], second["alert_fired"]) == (True, False)
+        assert telegram.chats() == sorted(ADMINS)
 
 
 # ─── Growth across the whole data directory ───────────────────────────────────

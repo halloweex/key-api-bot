@@ -16,8 +16,12 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
+from tests.helpers.ci_bot_scheduler_tools import (
+    FakeTools, absolute_calls, docker_build, docker_run,
+)
 from tests.repo_tree import needs_checkout
 
 REPO = Path(__file__).resolve().parents[2]
@@ -316,61 +320,78 @@ class TestTheGatesTestTheCodeInFrontOfThem:
     exists to prevent — a check that quietly checks the wrong thing — and it
     sat in the script that decides whether something ships.
 
-    Asserted on the image name and the build command rather than on the
-    comments beside them: a grep for the reason passes while the behaviour
-    regresses.
+    Run, not read: each gate goes under a `docker` that records what it is
+    asked and answers yes (`tests/helpers/ci_bot_scheduler_tools.py`), from a
+    checkout of its own, and the build and the runs are read off the calls.
     """
 
-    GATES = ("gate_with_stores.sh", "quick_gate.sh")
+    # The argument each gate needs to start: quick_gate.sh runs what it is given.
+    GATES = {"gate_with_stores.sh": (), "quick_gate.sh": ("tests/unit/test_example.py",)}
 
-    def _script(self, name):
-        return (REPO / "deploy" / name).read_text()
+    def _gate(self, tmp_path, name, *, image_there=True, **env):
+        script = REPO / "deploy" / name
+        assert absolute_calls(script.read_text(), ("docker", "flock")) == [], (
+            f"{name} names docker or flock by a path the fakes cannot stand in for")
+        tools = FakeTools(tmp_path / "tools", ("docker", "flock"))
+        if not image_there:
+            tools.answer("docker", "image", "inspect", exit=1,
+                         stderr="Error: No such image\n")
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        result = tools.run(script, *self.GATES[name], env={"REPO": str(checkout), **env})
+        return result, tools.calls("docker"), checkout
 
-    def _default_image(self, text):
-        m = re.search(r'IMAGE="\$\{IMAGE:-([^}]+)\}"', text)
-        assert m, "the script no longer has a defaulted IMAGE"
-        return m.group(1)
+    @staticmethod
+    def _runs_of_the_tests(calls, checkout):
+        """The containers the checkout's `tests/` is mounted into."""
+        runs = [docker_run(c.argv) for c in calls if c.argv[0] == "run"]
+        return [r for r in runs if r.target_of(checkout / "tests")]
 
-    def test_neither_gate_defaults_to_an_image_from_a_registry(self):
-        """A name with a namespace in it is pulled, not built — which is
-        exactly how the gate came to test a release instead of a branch."""
-        for name in self.GATES:
-            image = self._default_image(self._script(name))
-            assert "/" not in image, (
-                f"{name} defaults to {image!r}, which names a registry image; "
-                f"the gate would then test what is published, not what is here"
-            )
+    @pytest.mark.parametrize("name", sorted(GATES))
+    def test_the_suite_runs_in_the_image_built_from_the_checkout(self, tmp_path, name):
+        """Built from the checkout's Dockerfile.web, and run only after the
+        build: a build after the suite proves nothing about the suite that
+        just ran."""
+        result, calls, checkout = self._gate(tmp_path, name)
+        assert result.returncode == 0, result.stdout + result.stderr
 
-    def test_each_gate_builds_the_image_it_then_runs(self):
-        for name in self.GATES:
-            text = self._script(name)
-            build = re.search(r'docker build[^\n]*-t "\$IMAGE"[^\n]*', text)
-            assert build, f"{name} never builds $IMAGE"
-            assert "Dockerfile.web" in build.group(0), (
-                f"{name} builds $IMAGE from something other than Dockerfile.web"
-            )
+        builds = [i for i, c in enumerate(calls) if c.argv[0] == "build"]
+        assert len(builds) == 1, f"{name} built {len(builds)} times"
+        build = docker_build(calls[builds[0]].argv)
+        assert (Path(build.dockerfile), Path(build.context)) == (
+            checkout / "Dockerfile.web", checkout)
+        (tag,) = build.tags
+        # Built over a tag production runs, the branch would be what the
+        # next `docker compose up -d` starts.
+        published = {s["image"] for s in yaml.safe_load(
+            (REPO / "docker-compose.yml").read_text())["services"].values() if "image" in s}
+        assert tag not in published, f"{name} builds over {tag}, which production runs"
 
-    def test_the_build_happens_before_anything_runs_that_image(self):
-        """Ordering is the whole property: a build after the suite proves
-        nothing about the suite that just ran."""
-        for name in self.GATES:
-            text = self._script(name)
-            build_at = text.index('docker build')
-            runs = [m.start() for m in re.finditer(r'--entrypoint sh "\$IMAGE"', text)]
-            assert runs, f"{name} never runs $IMAGE"
-            assert build_at < min(runs), (
-                f"{name} runs the image before building it"
-            )
+        suite = self._runs_of_the_tests(calls, checkout)
+        assert suite, f"{name} never runs the checkout's tests"
+        assert {r.image for r in suite} == {tag}, (
+            f"{name} tests the checkout in {sorted({r.image for r in suite})}, "
+            f"not in the {tag} it built")
+        first_run = min(i for i, c in enumerate(calls)
+                        if c.argv[0] == "run" and docker_run(c.argv).image == tag)
+        assert builds[0] < first_run, f"{name} runs {tag} before building it"
 
-    def test_skipping_the_build_checks_the_image_is_actually_there(self):
-        """`SKIP_BUILD=1` against an image that does not exist should say so,
-        not fail later inside a container command."""
-        for name in self.GATES:
-            text = self._script(name)
-            assert "SKIP_BUILD" in text, f"{name} has no way to skip the build"
-            assert 'docker image inspect "$IMAGE"' in text, (
-                f"{name} skips the build without checking the image exists"
-            )
+    @pytest.mark.parametrize("name", sorted(GATES))
+    @pytest.mark.parametrize("there", [True, False], ids=["image_there", "no_such_image"])
+    def test_skipping_the_build_runs_only_an_image_that_is_there(self, tmp_path, name, there):
+        """`SKIP_BUILD=1` against an image that does not exist should stop
+        before any container starts, not fail later inside one."""
+        result, calls, checkout = self._gate(
+            tmp_path, name, image_there=there, SKIP_BUILD="1", IMAGE="keycrm-web:pulled")
+
+        assert [c for c in calls if c.argv[0] == "build"] == []
+        if there:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert {r.image for r in self._runs_of_the_tests(calls, checkout)} == {
+                "keycrm-web:pulled"}
+        else:
+            assert result.returncode != 0
+            assert [c.argv for c in calls if c.argv[0] == "run"] == []
 
 
 def _runtime_python() -> str:

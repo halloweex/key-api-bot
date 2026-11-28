@@ -374,29 +374,40 @@ class TestTheGoalTablesTransaction:
         assert await _all_pg(pool, stamps=True) == before
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("fails_on", [
-        "pg_advisory_xact_lock", "INSERT INTO meta.chain_watermarks",
-        "INSERT INTO app.seasonal_indices", "SELECT 1 FROM app.growth_metrics",
-        "INSERT INTO app.growth_metrics", "UPDATE app.seasonal_indices",
-        "INSERT INTO app.weekly_patterns",
-    ])
     async def test_a_failure_at_any_statement_leaves_every_table_as_it_was(
-            self, stores, fails_on):
+            self, stores):
+        """The set is one transaction: fail the writer's first statement, then
+        its second, and so on until a run gets through, and after each failure
+        the three tables and the owner rows are as they were. Counted, never
+        named, so a statement reworded or added is covered as it stands.
+        Mutation: run the statements outside the transaction."""
         _store, pool, _env = stores
         await _seed_set(pool)
         before = await _all_pg(pool, stamps=True)
-        failing = _FailingPool(pool, fails_on)
+        the_set = ([ROW, (4, 1.1, 3, 1100.0, 900.0, 1300.0, "high")],
+                   (0.5, date(2023, 12, 2), date(2025, 12, 31), 1),
+                   {3: 0.3, 4: 0.31}, [(3, 1, 0.3, 2), (4, 1, 0.25, 2)], NOW)
 
-        with patch.object(pg_forecast_write, "_pool", AsyncMock(return_value=failing)):
-            with pytest.raises(_Injected):
-                await pg_forecast_write.persist_goal_tables(
-                    [ROW, (4, 1.1, 3, 1100.0, 900.0, 1300.0, "high")],
-                    (0.5, date(2023, 12, 2), date(2025, 12, 31), 1),
-                    {3: 0.3, 4: 0.31}, [(3, 1, 0.3, 2), (4, 1, 0.25, 2)], NOW)
+        fail_at = 0
+        while True:
+            fail_at += 1
+            assert fail_at < 50, "the writer never got through"
+            failing = _FailingPool(pool, fail_at)
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=failing)):
+                try:
+                    await pg_forecast_write.persist_goal_tables(*the_set)
+                except _Injected:
+                    pass
+                else:
+                    break
+            assert await _all_pg(pool, stamps=True) == before, f"statement {fail_at}"
+            assert await chain_latch.read_owners(pool) == {}, f"statement {fail_at}"
 
-        assert failing.hit, f"{fails_on!r} was never executed"
-        assert await _all_pg(pool, stamps=True) == before
-        assert await chain_latch.read_owners(pool) == {}
+        # The run that got through wrote the set and claimed the chain, so
+        # every failure above rolled a real write back.
+        assert fail_at > 1, "no statement was ever failed"
+        assert await _all_pg(pool, stamps=True) != before
+        assert set(await chain_latch.read_owners(pool)) == set(TABLES)
 
 
 class _Injected(Exception):
@@ -404,36 +415,31 @@ class _Injected(Exception):
 
 
 class _FailingConn:
-    """The writer's connection, raising on the first statement that carries
-    `needle` — inside the writer's own transaction."""
+    """The writer's connection: its `fail_at`-th statement, counted across
+    every call that sends one, raises instead of running — inside the
+    writer's own transaction."""
 
-    def __init__(self, conn, needle, pool):
-        self._conn, self._needle, self._pool = conn, needle, pool
+    STATEMENTS = ("execute", "executemany", "fetch", "fetchrow", "fetchval")
 
-    def _check(self, sql):
-        if self._needle in sql:
-            self._pool.hit = True
-            raise _Injected(self._needle)
-
-    async def execute(self, sql, *a, **k):
-        self._check(sql)
-        return await self._conn.execute(sql, *a, **k)
-
-    async def executemany(self, sql, *a, **k):
-        self._check(sql)
-        return await self._conn.executemany(sql, *a, **k)
-
-    async def fetchval(self, sql, *a, **k):
-        self._check(sql)
-        return await self._conn.fetchval(sql, *a, **k)
+    def __init__(self, conn, pool):
+        self._conn, self._pool = conn, pool
 
     def __getattr__(self, name):
-        return getattr(self._conn, name)
+        attr = getattr(self._conn, name)
+        if name not in self.STATEMENTS:
+            return attr
+
+        async def statement(*a, **k):
+            self._pool.sent += 1
+            if self._pool.sent == self._pool.fail_at:
+                raise _Injected(f"statement {self._pool.sent}")
+            return await attr(*a, **k)
+        return statement
 
 
 class _FailingPool:
-    def __init__(self, pool, needle):
-        self._pool, self._needle, self.hit = pool, needle, False
+    def __init__(self, pool, fail_at):
+        self._pool, self.fail_at, self.sent = pool, fail_at, 0
 
     def acquire(self):
         outer = self
@@ -442,7 +448,7 @@ class _FailingPool:
             async def __aenter__(self):
                 self._ctx = outer._pool.acquire()
                 conn = await self._ctx.__aenter__()
-                return _FailingConn(conn, outer._needle, outer)
+                return _FailingConn(conn, outer)
 
             async def __aexit__(self, *exc):
                 return await self._ctx.__aexit__(*exc)

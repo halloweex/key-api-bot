@@ -568,27 +568,17 @@ class TestPredictionsStored:
             {"date": "2026-10-07", "predicted_revenue": 1000.0}])
         return svc
 
-    def test_a_store_that_fails_is_reported(self, monkeypatch):
-        store = AsyncMock()
-        store.store_predictions.side_effect = RuntimeError("Postgres refused")
-        svc = self._service(monkeypatch, store)
-        result = asyncio.run(svc._train_impl("retail"))
-        assert result["status"] == "success"
-        assert result["predictions_stored"] is False
-
-    def test_a_store_that_lands_is_reported(self, monkeypatch):
-        store = AsyncMock()
-        svc = self._service(monkeypatch, store)
-        result = asyncio.run(svc._train_impl("retail"))
-        assert result["predictions_stored"] is True
-        store.store_predictions.assert_awaited_once()
-
-    def test_a_second_run_does_not_inherit_the_first_verdict(self, monkeypatch):
+    def test_each_run_reports_its_own_store(self, monkeypatch):
+        """A store that lands reads True; the next run, whose store fails,
+        still trains and reads False — never the first run's verdict."""
         store = AsyncMock()
         svc = self._service(monkeypatch, store)
         assert asyncio.run(svc._train_impl("retail"))["predictions_stored"] is True
-        store.store_predictions.side_effect = RuntimeError("down")
-        assert asyncio.run(svc._train_impl("retail"))["predictions_stored"] is False
+
+        store.store_predictions.side_effect = RuntimeError("Postgres refused")
+        result = asyncio.run(svc._train_impl("retail"))
+        assert result["status"] == "success"
+        assert result["predictions_stored"] is False
 
 
 # ─── The smart goal reads one set ───────────────────────────────────────────

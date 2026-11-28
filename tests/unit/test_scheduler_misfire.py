@@ -68,13 +68,41 @@ class TestMisfireGrace:
 
 
 class TestInvariantJobsUseCron:
-    def test_hours_avoid_the_dst_window(self):
-        """Europe/Kyiv shifts at 03:00 and 04:00. A cron job at either hour is
-        skipped or doubled twice a year."""
-        hours = {int(h) for h in INVARIANT_CHECK_HOURS.split(",")}
+    def test_every_day_of_the_year_gets_the_same_number_of_checks(self):
+        """Europe/Kyiv moves its clocks at 03:00 and 04:00 twice a year, and a
+        cron hour inside the change is skipped or doubled that day. Production
+        runs in Kyiv's zone; there, every day of 2026, the two the clocks moved
+        on included, gets as many checks as any other."""
+        from datetime import date, datetime, timedelta, timezone
 
-        assert not (hours & {3, 4})
-        assert len(hours) == 4
+        from core.scheduler import SCHEDULER_TIMEZONE as kyiv
+
+        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=kyiv)
+
+        def midnight(day):
+            return datetime(day.year, day.month, day.day, tzinfo=kyiv)
+
+        def runs_on(day):
+            end, runs = midnight(day + timedelta(days=1)), 0
+            at = trigger.get_next_fire_time(None, midnight(day))
+            for _ in range(48):
+                if at is None or at >= end:
+                    break
+                runs += 1
+                # A second on in absolute time: wall-clock arithmetic steps
+                # back into the hour the clocks repeat.
+                after = (at.astimezone(timezone.utc) + timedelta(seconds=1)).astimezone(kyiv)
+                at = trigger.get_next_fire_time(at, after)
+            return runs
+
+        days = [date(2026, 1, 1) + timedelta(days=n) for n in range(365)]
+        moved = [d for d in days
+                 if midnight(d).utcoffset() != midnight(d + timedelta(days=1)).utcoffset()]
+        assert len(moved) == 2, f"no clock change in 2026 to test against: {moved}"
+        runs = {day: runs_on(day) for day in days}
+        usual = runs[days[0]]
+        assert usual > 0
+        assert {day: n for day, n in runs.items() if n != usual} == {}
 
     def test_no_six_hourly_interval_triggers_survive(self):
         """The trigger type is the bug, not the interval length."""

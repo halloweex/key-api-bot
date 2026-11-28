@@ -209,6 +209,9 @@ class TestTheCadenceIsElapsedTime:
 
 class TestARequestedRunIsMarked:
     def test_the_run_a_human_asked_for_is_marked_and_only_that_one(self):
+        """`run_job_now` — what "run now" on /api/jobs calls — marks the run
+        it causes, on a scheduler that is running, and the run the trigger
+        makes after it is not marked."""
         from core.alerting import ALERT_REQUESTED
         from core.scheduler import BackgroundScheduler, SCHEDULER_TIMEZONE
 
@@ -217,20 +220,28 @@ class TestARequestedRunIsMarked:
         async def probe():
             seen.append(ALERT_REQUESTED.get())
 
-        s = BackgroundScheduler()
-        s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
-        s._add_job(job_id="probe", name="probe", description="probe",
-                   func=probe, trigger=IntervalTrigger(hours=6))
-        job = s._scheduler.get_job("probe")
+        async def until(count):
+            for _ in range(500):
+                if len(seen) >= count:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError(f"the probe ran {len(seen)} times, not {count}")
 
-        s._requested_runs.add("probe")   # what run_job_now records
-        asyncio.run(job.func())
-        asyncio.run(job.func())          # the next scheduled run
+        async def scenario():
+            s = BackgroundScheduler()
+            s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
+            s._add_job(job_id="probe", name="probe", description="probe",
+                       func=probe, trigger=IntervalTrigger(hours=6))
+            s._scheduler.start()
+            try:
+                await s.run_job_now("probe")
+                await until(1)
+                # The trigger's own time arriving, six hours on.
+                s._scheduler.get_job("probe").modify(
+                    next_run_time=datetime.now(SCHEDULER_TIMEZONE))
+                await until(2)
+            finally:
+                s._scheduler.shutdown(wait=False)
+
+        asyncio.run(scenario())
         assert seen == [True, False]
-
-    def test_run_job_now_records_the_request(self):
-        import inspect
-        from core.scheduler import BackgroundScheduler
-
-        src = inspect.getsource(BackgroundScheduler.run_job_now)
-        assert "_requested_runs.add(job_id)" in src

@@ -39,22 +39,27 @@ class TestKeyCRMClient:
         assert client._client is None
 
     @pytest.mark.asyncio
-    async def test_get_orders_success(self):
-        """Should fetch orders successfully."""
-        client = KeyCRMClient(api_key="test-key")
+    async def test_get_orders_sends_the_key_and_the_params_and_returns_the_answer(
+            self, monkeypatch):
+        """At KeyCRM's HTTP transport, under the client `connect()` builds:
+        one GET of the order listing, the key as a bearer token, the params
+        as given, and KeyCRM's JSON handed back as it came."""
+        from datetime import datetime, timezone
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = b'{"data": [{"id": 1}]}'
-        mock_response.json.return_value = {"data": [{"id": 1}]}
+        from tests.helpers.orders_sync import keycrm_serving_orders, order_payload
 
-        with patch.object(client, "_client") as mock_client:
-            mock_client.request = AsyncMock(return_value=mock_response)
-            client._client = mock_client
+        order = order_payload(1, created=datetime(2026, 11, 2, 9, 0, tzinfo=timezone.utc))
+        served = keycrm_serving_orders(monkeypatch, [order])
 
-            result = await client.get_orders({"limit": 10})
+        async with KeyCRMClient(api_key="test-key") as client:
+            result = await client.get_orders({"limit": 10, "page": 1})
 
-        assert result == {"data": [{"id": 1}]}
+        assert result == {"data": [order]}
+        (request,) = served.requests
+        assert request.method == "GET"
+        assert (request.url.host, request.url.path) == ("openapi.keycrm.app", "/v1/order")
+        assert request.headers["Authorization"] == "Bearer test-key"
+        assert dict(request.url.params) == {"limit": "10", "page": "1"}
 
     @pytest.mark.asyncio
     async def test_api_error_handling(self):

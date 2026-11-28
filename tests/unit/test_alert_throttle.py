@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from core.telegram_alerts import AlertThrottle, reset_throttle, throttle_check
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 
 bot_main = __import__("importlib").import_module("bot.main")
 
@@ -197,18 +198,22 @@ class TestTheDevKillSwitch:
         assert await telegram_alerts.send_admin_photo_http(b"png", "отчёт") == 0
 
     @pytest.mark.asyncio
-    async def test_bot_side_gate_spares_the_throttle(self, monkeypatch):
-        from bot import main as bot_main
+    async def test_a_suppressed_alert_leaves_its_throttle_slot(self, monkeypatch):
+        """The same alert, switched off and then on again: the suppressed one
+        reached nobody and bought no cooldown, so the next one goes out."""
         from core import telegram_alerts
 
-        monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "true")
-
-        def forbidden(*a, **kw):
-            raise AssertionError("suppressed alert consumed a throttle check")
-
-        monkeypatch.setattr(telegram_alerts, "throttle_check", forbidden)
-
-        assert await bot_main.send_admin_message("тревога", key="dq:test") == 0
+        telegram = telegram_at_the_transport(monkeypatch)
+        reset_throttle()
+        try:
+            monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "true")
+            assert await bot_main.send_admin_message("тревога", key="dq:test") == 0
+            monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "0")
+            assert await bot_main.send_admin_message(
+                "тревога", key="dq:test") == len(ADMINS)
+        finally:
+            reset_throttle()
+        assert telegram.chats() == sorted(ADMINS)
 
     def test_unset_means_alerts_flow(self, monkeypatch):
         from core import telegram_alerts

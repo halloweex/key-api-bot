@@ -7,11 +7,22 @@ alert is indistinguishable from the throttle holding it. The gate: a
 "✅ resolved" may only follow a fired notice that reached someone — otherwise
 the first thing a human hears about a condition is that it went away.
 """
+from contextlib import ExitStack
+from datetime import datetime, timezone
+from typing import Any, Callable, NamedTuple
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.alerting import AlertGate, raise_alert, reset_gate, resolve_group
+from core.alerting import (
+    AlertGate, delivered_conditions, is_condition, raise_alert, reset_gate, resolve_group,
+)
+from core.data_quality import Discrepancy, DiscrepancyClass, IntegrityIssue, Severity
+from tests.helpers.alerts_journal_pg import alert_ledger, settle
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
+from tests.helpers.warehouse_dq_facts import _facts as clean_twin_facts
+from tests.integration.pg_tab_seed import needs_postgres
+from tests.journal_fake import install_journal
 
 
 @pytest.fixture(autouse=True)
@@ -305,6 +316,120 @@ class TestEmitterWiring:
                rg.await_args.args[1:] == ([],)
 
 
+# ─── Every layer that pages, run with a CRITICAL beside a WARN ──────────────
+
+
+def _issue(name, severity):
+    return IntegrityIssue(check_name=name, table_name="t", severity=severity,
+                          count=1, sample_ids=[], description="d")
+
+
+def _discrepancy(diff_class, severity):
+    return Discrepancy(month="2026-11", source_id=4, diff_class=diff_class,
+                       field="orders", dk_value=1.0, kc_value=2.0,
+                       severity=severity, order_ids=(101,))
+
+
+async def _integrity_job(*, scan, twins=(), chains=None):
+    """The integrity job. Its scan answers `scan`, or raises it; the Postgres
+    twins file `twins`; the chain invariants file `chains` over a read of
+    every chain, or, with None, could not read; the capture stamps are unread."""
+    from core import analytics_captures, pg_chain_invariants, pg_warehouse_dq
+    from core.scheduler import BackgroundScheduler
+
+    watched = tuple(sorted(pg_chain_invariants.watched_chains()))
+    unread = AsyncMock(side_effect=RuntimeError("not read in this test"))
+    with ExitStack() as stack:
+        enter = stack.enter_context
+        if isinstance(scan, BaseException):
+            enter(patch("core.data_quality.check_internal_integrity", side_effect=scan))
+        else:
+            enter(patch("core.data_quality.check_internal_integrity", return_value=list(scan)))
+        enter(patch.object(pg_warehouse_dq, "read_facts",
+                           AsyncMock(return_value=clean_twin_facts())))
+        enter(patch.object(pg_warehouse_dq, "check_pg_warehouse", return_value=list(twins)))
+        if chains is None:
+            enter(patch.object(pg_chain_invariants, "read_facts", AsyncMock(
+                return_value=pg_chain_invariants.Facts.blind(watched, "not read in this test"))))
+        else:
+            enter(patch.object(pg_chain_invariants, "read_facts", AsyncMock(
+                return_value=pg_chain_invariants.Facts(watched=watched))))
+            enter(patch.object(pg_chain_invariants, "judge", return_value=list(chains)))
+        enter(patch.object(analytics_captures, "read_facts", AsyncMock(
+            return_value=analytics_captures.Facts(unwatched="not read in this test"))))
+        for read in ("core.pg_inventory_write.read_snapshot_calendar",
+                     "core.pg_chain_watermarks.read_values_and_stamps",
+                     "core.pg_frozen_metadata.frozen_sync_rows"):
+            enter(patch(read, unread))
+        await BackgroundScheduler()._run_dq_integrity()
+
+
+async def _integrity(layer, found):
+    await _integrity_job(scan=found)
+
+
+async def _mirror_landing(layer, found):
+    """The mirror_landing job, the order archive's check finding `found` and
+    every other check clean."""
+    from core.scheduler import BackgroundScheduler
+
+    clean = AsyncMock(return_value=[])
+    with patch("core.mirror_reconciliation.reconcile_order_utm_completeness", clean), \
+         patch("core.mirror_reconciliation.pg_gold_internal_check", clean), \
+         patch("core.mirror_reconciliation.reconcile_order_versions",
+               AsyncMock(return_value=list(found))), \
+         patch("core.mirror_reconciliation.reconcile_buyer_completeness", clean), \
+         patch("core.ch_silver.reconcile_clickhouse", clean), \
+         patch("core.ch_history.reconcile_ch_history", clean):
+        await BackgroundScheduler()._run_dq_mirror_landing()
+
+
+async def _reconciliation(layer, found):
+    """An arm of the 05:30 job persisting its verdict: `found` is (issues,
+    discrepancies)."""
+    from core.scheduler import BackgroundScheduler
+
+    scheduler = BackgroundScheduler()
+    persist = {"reconciliation_pg": scheduler._persist_postgres_reconciliation,
+               "reconciliation_ch": scheduler._persist_ch_reconciliation}[layer]
+    issues, discrepancies = found
+    now = datetime.now(timezone.utc)
+    await persist({"issues": issues, "discrepancies": discrepancies, "error": None},
+                  started_at=now, as_of=now, window_start=now.date(), window_end=now.date())
+
+
+class _Layer(NamedTuple):
+    run: Callable
+    found: Any
+    page: list      # the conditions the page is about: its CRITICALs
+    riders: list    # what rode along in the same run, each a registered condition
+
+
+_CRIT, _WARN = Severity.CRITICAL, Severity.WARN
+_DRIFT, _MISMATCH = DiscrepancyClass.STATUS_DRIFT, DiscrepancyClass.VALUE_MISMATCH
+
+PAGING_LAYERS = {
+    "integrity": _Layer(
+        _integrity,
+        [_issue("freshness_orders", _CRIT), _issue("inventory_snapshot_gaps", _WARN)],
+        ["freshness_orders"], ["inventory_snapshot_gaps"]),
+    "mirror_landing": _Layer(
+        _mirror_landing,
+        [_issue("order_versions_stalled", _CRIT), _issue("buyers_without_verdict", _WARN)],
+        ["order_versions_stalled"], ["buyers_without_verdict"]),
+    "reconciliation_pg": _Layer(
+        _reconciliation,
+        ([_issue("mirror_backfill_pending", _WARN)],
+         [_discrepancy(_DRIFT, _CRIT), _discrepancy(_MISMATCH, _WARN)]),
+        ["recon_pg:status_drift"], ["mirror_backfill_pending", "recon_pg:value_mismatch"]),
+    "reconciliation_ch": _Layer(
+        _reconciliation,
+        ([_issue("ch_reconcile_pending", _WARN)],
+         [_discrepancy(_DRIFT, _CRIT), _discrepancy(_MISMATCH, _WARN)]),
+        ["recon_ch:status_drift"], ["ch_reconcile_pending", "recon_ch:value_mismatch"]),
+}
+
+
 class TestPageConditionsAreCriticalOnly:
     """The first real night found this: a CRITICAL alert's conditions list
     carried the WARN/INFO findings riding in the same run, and the resolve
@@ -312,20 +437,52 @@ class TestPageConditionsAreCriticalOnly:
     '✅ mirror_retired_rows — stood 0m' about a standing INFO that had not
     gone anywhere. The page is about what pages; the digest owns the rest."""
 
-    def test_the_four_dq_sites_pass_critical_only(self):
-        """Five until step 14's S14-12 deleted the DuckDB arm of
-        `dq_reconciliation` and its page."""
-        import pathlib
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("layer", list(PAGING_LAYERS))
+    async def test_a_page_is_about_its_criticals_alone(self, layer, monkeypatch):
+        """Every layer that pages, run once with a CRITICAL beside a WARN
+        (each a registered condition, so a WARN that rode along would be held
+        as heard and announced). The page reaches each admin once, the ledger
+        journals the CRITICAL alone, and nothing is announced resolved.
+        Mutation: build any layer's `conditions` from every finding again."""
+        spec = PAGING_LAYERS[layer]
+        assert all(is_condition(name) for name in spec.page + spec.riders)
 
-        src = pathlib.Path("core/scheduler.py").read_text()
-        # The two reconciliation arms add their discrepancy conditions after
-        # the bracket (L4-01): CRITICAL-only too, by `discrepancy_conditions`.
-        assert src.count(
-            "if i.severity == Severity.CRITICAL],"
-        ) == 2
-        assert src.count(
-            "if i.severity == Severity.CRITICAL]\n"
-            "                + discrepancy_conditions(layer, discrepancies),"
-        ) == 2
-        # And the old unfiltered form is extinct.
-        assert "conditions=[i.check_name for i in issues]," not in src
+        install_journal(monkeypatch)
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await spec.run(layer, spec.found)
+            await settle()
+            events = await ledger.events()
+
+        assert telegram.chats() == sorted(ADMINS)
+        assert events == [(name, "fired", len(ADMINS)) for name in spec.page]
+        assert delivered_conditions() == {name: f"dq:{layer}" for name in spec.page}
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_a_failed_scan_still_clears_what_dropped_to_warn(self, monkeypatch):
+        """When the integrity scan raises, the Postgres twins and the chain
+        invariants did look, so a page of theirs that dropped to WARN is
+        announced cleared on that run, by its prefix: their still-firing
+        lists are CRITICAL-only too. Mutation: hold every twin or chain
+        finding there, whatever its severity."""
+        twin, chain = "pg_silver_missing_rows", "chain_sequence_behind"
+        install_journal(monkeypatch)
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await _integrity_job(scan=[], twins=[_issue(twin, _CRIT)],
+                                 chains=[_issue(chain, _CRIT)])
+            heard = delivered_conditions()
+            await _integrity_job(scan=RuntimeError("the scan raised"),
+                                 twins=[_issue(twin, _WARN)], chains=[_issue(chain, _WARN)])
+            await settle()
+            events = sorted((key, kind) for key, kind, _ in await ledger.events())
+
+        assert heard == {twin: "dq:integrity", chain: "dq:integrity"}
+        assert delivered_conditions() == {}
+        assert events == [(chain, "fired"), (chain, "resolved"),
+                          (twin, "fired"), (twin, "resolved")]
+        # The page, then one notice for each family.
+        assert telegram.chats() == sorted(ADMINS * 3)

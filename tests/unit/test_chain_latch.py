@@ -142,6 +142,11 @@ class TestAWriteThatNeverReachesPostgres:
     `web` coming up ahead of `migrate`,
     plus one submitted expense form in that window, used to spend that — on a
     chain that had written nothing, for ever, with no copy-back built yet.
+
+    The revision's case, for every writer and without the latch: a writer
+    behind the schema raises and takes no connection
+    (`tests/integration/test_latch_waits_for_a_connection.py`,
+    `TestAWriterBehindTheSchemaWritesNothing`).
     """
 
     @pytest_asyncio.fixture
@@ -151,23 +156,15 @@ class TestAWriteThatNeverReachesPostgres:
         s = AnalyticsStore()
         yield s
 
-    @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
-    async def test_an_unreachable_postgres_leaves_the_chain_unlatched(
-        self, flags, store, failing,
-    ):
+    async def test_an_unreachable_postgres_leaves_the_chain_unlatched(self, flags, store):
         from datetime import date
 
         flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        broken = AsyncMock(side_effect=OSError("connection refused")
-                           if failing == "get_pool" else
-                           RuntimeError("schema revision 0032, expected 0033"))
+        broken = AsyncMock(side_effect=OSError("connection refused"))
 
-        # The revision case needs a pool to get past, or `get_pool` raises on
-        # the missing DSN first and the case proves nothing (review of PR-3).
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
-                patch(f"core.pg.{failing}", new=broken):
-            with pytest.raises((OSError, RuntimeError)):
+        with patch("core.pg.get_pool", new=broken):
+            with pytest.raises(OSError):
                 await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
         broken.assert_awaited_once()
 
@@ -230,23 +227,19 @@ class TestAWriteThatNeverReachesPostgres:
 
         assert not chain_latch.latched("pg_inventory_write")
 
-    @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
-    async def test_the_buyers_chain_through_the_buyers_step(self, flags, store, failing):
-        """Chain 4 writes on the incremental tick, ~19 buyers a day: a web that
-        came up ahead of `migrate` would otherwise make its first flip
-        irreversible on the first new buyer, with not one written."""
+    async def test_the_buyers_chain_through_the_buyers_step(self, flags, store):
+        """Chain 4 writes on the incremental tick, ~19 buyers a day: a
+        Postgres restart would otherwise make its first flip irreversible on
+        the first new buyer, with not one written."""
         from core.models import Buyer
 
         flags.setenv("KS_WRITE_BUYERS", "postgres")
         for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
             flags.setenv(reader, "postgres")           # its precondition
-        broken = AsyncMock(side_effect=OSError("connection refused")
-                           if failing == "get_pool" else
-                           RuntimeError("schema revision 0032, expected 0033"))
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
-                patch(f"core.pg.{failing}", new=broken):
-            with pytest.raises((OSError, RuntimeError)):
+        broken = AsyncMock(side_effect=OSError("connection refused"))
+        with patch("core.pg.get_pool", new=broken):
+            with pytest.raises(OSError):
                 await store.upsert_buyers([Buyer.from_api({"id": 1, "full_name": "Олена"})])
         broken.assert_awaited_once()
 

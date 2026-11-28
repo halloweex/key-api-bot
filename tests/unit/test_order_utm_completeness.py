@@ -16,11 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.data_quality import (
-    HUMAN_CHECK_NAMES,
-    Severity,
-    remediation_for,
-)
+from core.data_quality import HUMAN_CHECK_NAMES, Severity
 from core.mirror_reconciliation import (
     ORDER_UTM_PG_TABLE,
     order_utm_completeness_findings,
@@ -34,6 +30,12 @@ SILVER_GRACE_MINUTES = 20
 
 NAMES = ("pg_order_utm_missing", "pg_order_utm_stale", "pg_order_utm_in_flight")
 SINCE = datetime(2030, 6, 5, 4, 9, tzinfo=timezone.utc)
+
+# A route a lever names, with the method written before it if one is: the
+# path ends on a word character or a `{placeholder}`, so the full stop of a
+# sentence is not read as part of it.
+_LEVER_ROUTE = re.compile(r"(?:\b(GET|POST|PUT|PATCH|DELETE) )?(/api/[\w{}/.-]*[\w}])")
+_LEVER_JOB = re.compile(r"/api/jobs/(\w+)/trigger")
 
 
 def _row(**counts):
@@ -170,17 +172,46 @@ class TestTheGraceFollowsTheFloor:
 
 class TestTheReaderIsToldWhatToDo:
 
-    def test_every_route_the_lever_names_exists(self):
-        """A lever that names a route nobody registered sends the reader to a
-        404 at the moment they are acting on a page."""
-        from tests.routes_helper import find_endpoint
+    def test_every_route_a_lever_names_is_served(self, monkeypatch):
+        """A lever that names a route nobody serves sends the reader to a 404
+        at the moment they are acting on a page — any lever, this module's
+        among them. Each route is asked anonymously, so nothing runs: a route
+        that exists answers with its sign-in gate (or, for the open health
+        check, an answer), one that does not with 404 or 405. A job a lever
+        triggers must be one the scheduler registers, or the trigger is a 404
+        too."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from fastapi.testclient import TestClient
+
+        from core.data_quality import REMEDIATION
+        from core.scheduler import registered_job_ids
         from web.main import app
 
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        named = re.findall(r"POST (/api/[\w/-]+)", line)
-        assert set(named) == {"/api/traffic/refresh"}
-        for path in named:
-            assert find_endpoint(app, path, "POST") is not None, path
+        # The open health check reads no store here: it is asked whether it
+        # is served, not what it says.
+        monkeypatch.setattr("core.pg.get_pool",
+                            AsyncMock(side_effect=OSError("no store in this test")))
+        client = TestClient(app)
+
+        def served(method, path):
+            # A path written without a method is read or posted to by the
+            # sentence around it ("POST /api/a or /api/b"): either will do.
+            concrete = re.sub(r"\{\w+\}", "1", path)
+            return {m: client.request(m, concrete).status_code
+                    for m in ([method] if method else ["GET", "POST"])}
+
+        jobs = set(asyncio.run(registered_job_ids()))
+        asked = 0
+        for prefix, lever in REMEDIATION:
+            for method, path in _LEVER_ROUTE.findall(lever):
+                asked += 1
+                answers = served(method, path)
+                assert set(answers.values()) - {404, 405}, (prefix, path, answers)
+            for job in _LEVER_JOB.findall(lever):
+                assert job in jobs, (prefix, job)
+        assert asked, "no lever names a route: the pattern reads none of them"
 
     def test_the_refresh_the_line_names_parses_by_itself(self):
         """A lever that waited for the next derivation could wait the floor out;

@@ -50,8 +50,9 @@ ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 BACKFILL_PATH = "/api/traffic/backfill-utm"
 BACKFILL_STATUS_PATH = "/api/traffic/backfill-utm/status"
 
-# The two neighbours whose gate this file borrows, and the read that must stay
-# reachable without one.
+# The two neighbours whose gate this file borrows — refused to a non-admin
+# beside the backfill, below — and the read that must stay reachable without
+# one.
 ADMIN_TRAFFIC_POSTS = ["/api/traffic/refresh", "/api/traffic/reclassify"]
 TRANSACTIONS_PATH = "/api/traffic/transactions"
 
@@ -147,15 +148,30 @@ def launched(monkeypatch):
 
 # ─── The bypass: a viewer must not be able to start the job ───────────────────
 
-class TestBackfillUtmRequiresAdmin:
-    """Every non-admin role is refused, and refused *before* the launch."""
+@pytest.fixture
+def no_parse(monkeypatch):
+    """A tripwire under the two neighbours: should their gate go, the parse
+    they start fails the test here instead of re-parsing the test database."""
+    async def _tripped(**kwargs):
+        raise AssertionError(f"a non-admin started a UTM parse: {kwargs}")
 
+    monkeypatch.setattr(traffic, "_parse_in_postgres", _tripped)
+
+
+class TestBackfillUtmRequiresAdmin:
+    """Every non-admin role is refused, and refused *before* the launch — the
+    backfill, and its two neighbours, the re-parse doors whose gate the
+    backfill's was chosen from (`/refresh`, `/reclassify`): each rewrites
+    shared state for every reader of `/traffic`."""
+
+    @pytest.mark.parametrize("path", [BACKFILL_PATH, *ADMIN_TRAFFIC_POSTS])
     @pytest.mark.parametrize("role", ["viewer", "editor"])
-    def test_non_admin_is_forbidden(self, client, monkeypatch, launched, role):
+    def test_non_admin_is_forbidden(self, client, monkeypatch, launched, no_parse,
+                                    role, path):
         headers = _login(monkeypatch, role)
-        r = client.post(BACKFILL_PATH, headers=headers)
+        r = client.post(path, headers=headers)
         assert r.status_code == 403, \
-            f"a {role} started a warehouse-wide backfill: {r.status_code} {r.text}"
+            f"a {role} drove {path}: {r.status_code} {r.text}"
         assert launched == [], \
             f"forbidden, but the job was launched anyway: {launched}"
 
@@ -223,14 +239,6 @@ class TestTrafficRouteStructure:
             f"home must be admin-only and this list must name it"
         assert require_admin in set(route_dependencies(app, path, method)), \
             f"{method} {path} lets any approved viewer drive the warehouse"
-
-    @pytest.mark.parametrize("path", ADMIN_TRAFFIC_POSTS)
-    def test_neighbours_keep_their_gate(self, path):
-        """The evidence the backfill's gate was chosen from. If these two ever
-        lose `require_admin`, the argument for the one above changes too."""
-        from tests.routes_helper import route_dependencies
-
-        assert require_admin in set(route_dependencies(app, path, "POST"))
 
 
 # ─── The other direction: the reads must stay open ────────────────────────────

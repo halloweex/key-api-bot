@@ -11,6 +11,8 @@ and the assistant's tools answer it inside the conversation as
 """
 from __future__ import annotations
 
+import asyncio
+import socket
 import time
 
 import pytest
@@ -40,9 +42,28 @@ class TestTheClient:
         with pytest.raises(MeiliUnavailable):
             await getattr(meili_down, method)("abc", 5)
 
-    def test_searches_are_bounded_and_the_writers_are_not(self, meili_down):
-        assert meili_down.search_client.config.timeout == SEARCH_TIMEOUT_S <= 3
-        assert meili_down.client.config.timeout is None
+    @pytest.mark.asyncio
+    async def test_a_host_that_never_answers_costs_a_search_its_bound_and_no_more(self):
+        """L3-04 as it happened: the connection is taken and nothing comes
+        back. The search gives up at its bound and says so; a writer beside
+        it, which nobody is waiting on, is not cut off at a search's bound.
+        Mutation: build the search client without its timeout (the 15.3 s)."""
+        silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)  # the kernel takes the connections; nothing reads them
+        host, port = silent.getsockname()
+        client = MeiliClient(url=f"http://{host}:{port}", master_key="test-only")
+        writer = asyncio.create_task(client.index_buyers([{"id": 1, "full_name": "x"}]))
+        try:
+            started = time.monotonic()
+            with pytest.raises(MeiliUnavailable):
+                await asyncio.wait_for(client.search_buyers("abc", 5), SEARCH_TIMEOUT_S + 5)
+            assert time.monotonic() - started < SEARCH_TIMEOUT_S + 1
+            await asyncio.sleep(0.5)  # past the bound for the writer too
+            assert not writer.done(), "the writer gave up at a search's bound"
+        finally:
+            silent.close()  # what is still waiting on it is reset and returns
+            await asyncio.wait_for(asyncio.gather(writer, return_exceptions=True), 10)
 
 
 @pytest.fixture

@@ -13,8 +13,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
-import pathlib
 import textwrap
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -44,15 +44,14 @@ class TestWhatTheScanCouldNotSee:
         assert dq.unverified_conditions([], [_issue("inventory_continuity_unwatched")]) == [
             "inventory_snapshot_gaps"]
 
-    def test_unwatched_watermarks_leave_the_moved_freshness_unverified(self, monkeypatch):
+    def test_unwatched_watermarks_leave_the_judged_freshness_unverified(self):
         """Every chain's watermarks have moved since step 14's S14-00 (a
-        constant), so every one of them with a freshness threshold is held."""
-        from core.write_chains import sync_keys as stood_down_sync_keys
-
-        moved = sorted(f"freshness_{k[len('last_sync_'):]}" for k in stood_down_sync_keys()
-                       if k[len("last_sync_"):] in dq.FRESHNESS_THRESHOLDS)
-        assert {"freshness_offers", "freshness_stocks"} <= set(moved)
-        assert dq.unverified_conditions([], [_issue("sync_watermarks_unwatched")]) == moved
+        constant), so every one of them with a freshness threshold is held;
+        the search index's cursor has none and is not."""
+        assert dq.unverified_conditions([], [_issue("sync_watermarks_unwatched")]) == [
+            "freshness_buyers", "freshness_categories", "freshness_expense_types",
+            "freshness_managers", "freshness_offers", "freshness_orders",
+            "freshness_products", "freshness_stocks"]
 
     def test_a_clean_run_has_nothing_unverified(self):
         assert dq.unverified_conditions([], [_issue("pg_headline_vs_line_items")]) == []
@@ -105,12 +104,83 @@ class TestTheMapCannotDrift:
         emitted = {e for e in emitted if not e.endswith("_unwatched")}
         assert emitted and emitted == set(dq.GUARDED_CHECK_CONDITIONS[guard])
 
-    def test_the_job_hands_what_it_could_not_see_to_the_resolution(self):
-        from core.scheduler import BackgroundScheduler
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(BackgroundScheduler._run_dq_integrity)))
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
-        scan = [c for c in calls if isinstance(c.func, ast.Name) and c.func.id == "check_internal_integrity"]
-        assert scan and all(any(k.arg == "raised_out" for k in c.keywords) for c in scan)
-        resolve = [c for c in calls if isinstance(c.func, ast.Attribute) and c.func.attr == "_resolve_dq_layer"]
-        assert resolve and all(any(k.arg == "unverified" for k in c.keywords) for c in resolve)
+# ─── Through the job ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def integrity_job(monkeypatch):
+    """The integrity job with the real Gate: its journal a list
+    (`tests/journal_fake.py`), the snapshot calendar whole through yesterday,
+    the watermarks and their copy refused, the Postgres twins and the chain
+    invariants clean, and the admins' Telegram a list of what was sent."""
+    from core import pg_chain_invariants as inv
+    from core import pg_warehouse_dq as twins
+    from core.alerting import reset_gate
+    from core.scheduler import BackgroundScheduler
+    from tests.helpers.warehouse_dq_facts import _facts
+    from tests.journal_fake import install_journal
+
+    # No archive to record the alerts in (it stands down without a DSN), no
+    # agent task spooled into the tree, no Rust pilot to ask.
+    monkeypatch.delenv("KS_PG_DSN", raising=False)
+    monkeypatch.delenv("KS_ALERT_AGENT", raising=False)
+    monkeypatch.delenv("KS_RUST_API_URL", raising=False)
+    install_journal(monkeypatch)
+    today = datetime.now().astimezone().date()
+    first = today - timedelta(days=60)
+    calendar = (first, frozenset(first + timedelta(days=n) for n in range(60)))
+    refused = AsyncMock(side_effect=RuntimeError("no store in this test"))
+    sent = []
+
+    async def send(text, *_a, **_k):
+        sent.append(text)
+        return 1
+
+    reset_gate()
+    with patch("core.pg_inventory_write.read_snapshot_calendar",
+               AsyncMock(return_value=calendar)), \
+         patch("core.pg_chain_watermarks.read_values_and_stamps", refused), \
+         patch("core.pg_frozen_metadata.frozen_sync_rows", refused), \
+         patch.object(twins, "read_facts", AsyncMock(return_value=_facts())), \
+         patch.object(inv, "read_facts", AsyncMock(return_value=inv.Facts())), \
+         patch("bot.main.send_admin_message", new=AsyncMock(side_effect=send)):
+        yield BackgroundScheduler(), sent
+    reset_gate()
+
+
+def _a_standing_page(condition):
+    """`condition` delivered on the integrity layer and not yet resolved."""
+    from core.alerting import raise_alert
+
+    assert asyncio.run(raise_alert(
+        f"page: {condition}", conditions=[condition],
+        bucket=f"integrity:{condition}", group="dq:integrity")) == 1
+
+
+def _raises(*_a, **_k):
+    raise RuntimeError('relation "app.inventory_sku_history" does not exist')
+
+
+class TestTheJobAnnouncesOnlyWhatItSaw:
+    def test_a_check_that_raised_announces_no_recovery(self, integrity_job, monkeypatch):
+        """Mutation: resolve without the scan's `raised_out`, or without the
+        conditions it names."""
+        from core.alerting import delivered_conditions
+
+        scheduler, sent = integrity_job
+        _a_standing_page("inventory_snapshot_gaps")
+        monkeypatch.setattr(dq, "_inventory_snapshot_continuity_check", _raises)
+        asyncio.run(scheduler._run_dq_integrity())
+        assert len(sent) == 1, sent            # the page; no resolution
+        assert delivered_conditions().get("inventory_snapshot_gaps") == "dq:integrity"
+
+    def test_the_same_check_looking_and_finding_nothing_resolves_it(self, integrity_job):
+        from core.alerting import delivered_conditions
+
+        scheduler, sent = integrity_job
+        _a_standing_page("inventory_snapshot_gaps")
+        asyncio.run(scheduler._run_dq_integrity())
+        assert len(sent) == 2, sent            # the page, then its resolution
+        assert "inventory_snapshot_gaps" in sent[1]
+        assert "inventory_snapshot_gaps" not in delivered_conditions()

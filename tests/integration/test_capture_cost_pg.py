@@ -58,6 +58,9 @@ STOCKS = [(9_920_001, "COST-1", Decimal("100.00"), Decimal("50.00"), 5),
           (9_920_002, "COST-2", Decimal("80.50"), None, 0),
           (9_920_003, "COST-3", Decimal("12.00"), Decimal("7.25"), 9)]
 NEW_OFFER = (9_920_004, 9_920_104, "COST-4")
+# A constraint only new rows must meet, which no cost row can: the server
+# refusing the capture for one test, dropped by it and by `_clean`.
+REFUSED = "test_capture_cost_refused"
 
 
 async def _kyiv_today(conn) -> date:
@@ -66,6 +69,7 @@ async def _kyiv_today(conn) -> date:
 
 async def _clean(pool):
     async with pool.acquire() as conn:
+        await conn.execute(f"ALTER TABLE {TABLE} DROP CONSTRAINT IF EXISTS {REFUSED}")
         today = await _kyiv_today(conn)
         await conn.execute("DELETE FROM app.sku_inventory_status")
         await conn.execute("DELETE FROM bronze.offer_stocks")
@@ -162,26 +166,27 @@ class TestTheCostRidesThePhotograph:
 
 class TestItNeverFailsTheWriter:
     @pytest.mark.asyncio
-    async def test_a_capture_that_fails_on_the_server_leaves_the_photograph(
-            self, pool, monkeypatch):
-        """The real statement, made to fail on the server mid-transaction.
-        Kills: the capture outside its savepoint (the photograph rolls back
-        with it, or the writer raises), a failure left unstamped, and a
-        failed savepoint that poisons the next night's capture."""
-        real = pg_inventory_write._COST_CAPTURE_SQL
-        failing = real.replace("s.id,", "s.id / 0,")
-        assert failing != real
-        monkeypatch.setattr(pg_inventory_write, "_COST_CAPTURE_SQL", failing)
-
-        assert await pg_inventory_write.record_sku_inventory_snapshot(DAY) is True
+    async def test_a_capture_that_fails_on_the_server_leaves_the_photograph(self, pool):
+        """The real statement, refused by the server mid-transaction (a
+        constraint no cost row meets). Kills: the capture outside its
+        savepoint (the photograph rolls back with it, or the writer raises),
+        a failure left unstamped, and a failed savepoint that poisons the
+        next night's capture."""
         async with pool.acquire() as conn:
-            assert await _photographed(conn, DAY) == 3
-            assert await _costs(conn, DAY) == []
-            stamp = await _stamp(conn)
+            await conn.execute(
+                f"ALTER TABLE {TABLE} ADD CONSTRAINT {REFUSED} CHECK (false) NOT VALID")
+        try:
+            assert await pg_inventory_write.record_sku_inventory_snapshot(DAY) is True
+            async with pool.acquire() as conn:
+                assert await _photographed(conn, DAY) == 3
+                assert await _costs(conn, DAY) == []
+                stamp = await _stamp(conn)
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute(f"ALTER TABLE {TABLE} DROP CONSTRAINT IF EXISTS {REFUSED}")
         assert stamp["failures_since_ok"] == 1 and stamp["last_ok_at"] is None
-        assert stamp["last_error"].startswith("DivisionByZeroError")
+        assert stamp["last_error"].startswith("CheckViolationError")
 
-        monkeypatch.setattr(pg_inventory_write, "_COST_CAPTURE_SQL", real)
         assert await pg_inventory_write.record_sku_inventory_snapshot(NEXT_DAY) is True
         async with pool.acquire() as conn:
             assert await _costs(conn, NEXT_DAY) == _expected()

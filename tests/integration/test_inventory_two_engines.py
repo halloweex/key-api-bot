@@ -16,10 +16,11 @@ equally (rule 9 of the step-14 plan; all fifteen agreed). The views count from
 the server's own Kyiv day, which a test cannot pin, so every date in an answer
 is written as days before that day (`_relative`), the unit the fixture is
 built in. The monthly trend buckets by the calendar, so its answer moves with
-the day the suite runs: it is computed here instead (`_monthly_truth`), from
-the history the fixture writes, by the method's own rule. The store's DuckDB
-connection is a trap. Skipped without `KS_PG_DSN`, the contract every
-Postgres-touching test here has; `deploy/gate_with_stores.sh` supplies one.
+the day the suite runs: it is asked of a history of its own instead, pinned
+to the 1st of this month and of the last, and held to literal averages. The
+store's DuckDB connection is a trap. Skipped without `KS_PG_DSN`, the
+contract every Postgres-touching test here has; `deploy/gate_with_stores.sh`
+supplies one.
 
 THE FIXTURE IS DELIBERATELY AWKWARD
 
@@ -276,32 +277,6 @@ def _relative(value):
     return walk(value)
 
 
-def _monthly_truth(days: int) -> dict:
-    """`get_inventory_trend(days, "monthly")` as the method's rule computes it
-    from `HISTORY`: the snapshots on or after `TODAY - days`, by calendar
-    month, each month's average quantity and reserve rounded to a unit and
-    its average value to the kopeck, labelled `%b %Y`."""
-    months: dict = {}
-    for day, qty, value, reserve, _skus in HISTORY:
-        if day >= TODAY - timedelta(days=days):
-            months.setdefault(date(day.year, day.month, 1), []).append(
-                (qty, value, reserve))
-    rows = [(month, months[month]) for month in sorted(months)]
-
-    def avg(points, i):
-        return Decimal(sum(p[i] for p in points)) / Decimal(len(points))
-
-    return {
-        "labels": [month.strftime("%b %Y") for month, _ in rows],
-        "quantity": [round(avg(points, 0)) for _, points in rows],
-        "value": [round(float(avg(points, 1)), 2) for _, points in rows],
-        "reserve": [round(avg(points, 2)) for _, points in rows],
-        "granularity": "monthly",
-        "periodDays": days,
-        "dataPoints": len(rows),
-    }
-
-
 GOLDEN = golden("inventory")
 LITERAL_CALLS = tuple(
     (n, k) for n, k in CALLS if not (n == "get_inventory_trend"
@@ -323,14 +298,46 @@ class TestPostgresAnswersWhatDuckDBAnswered:
         assert set(GOLDEN) == {call_key(n, k) for n, k in LITERAL_CALLS}
 
     @pytest.mark.asyncio
-    async def test_the_monthly_trend_is_the_rule_on_the_fixture(self, in_postgres):
-        """The one call whose answer moves with the calendar: the months the
-        history falls in depend on the day the suite runs."""
-        answer = await in_postgres.get_inventory_trend(days=90, granularity="monthly")
-        assert _comparable(answer) == _comparable(_monthly_truth(90))
-        assert answer["dataPoints"] >= 2, (
-            "the monthly buckets must span more than one month or the grouping "
-            "is not being compared at all")
+    async def test_the_monthly_trend_averages_each_calendar_month(self, in_postgres):
+        """The one call whose answer moves with the calendar, asked of a
+        history pinned to the 1st of this month and of the last — so the months
+        the points fall in are known on any day the suite runs — and one point
+        far outside the 90 days. Each month is its points' average: quantity
+        and reserve to the unit, value to the kopeck."""
+        from core import pg
+
+        this_month = TODAY.replace(day=1)
+        last_month = (this_month - timedelta(days=1)).replace(day=1)
+        points = [
+            # (date, total_quantity, total_value, total_reserve, sku_count)
+            (last_month, 1000, Decimal("10000.10"), 10, 890),
+            (last_month + timedelta(days=1), 1001, Decimal("10000.20"), 11, 890),
+            (last_month + timedelta(days=2), 1003, Decimal("10000.40"), 11, 890),
+            (this_month, 2000, Decimal("20000.50"), 20, 891),
+            (last_month - timedelta(days=120), 9999, Decimal("99999.00"), 999, 1),
+        ]
+        insert = ("INSERT INTO app.inventory_history (date, total_quantity,"
+                  " total_value, total_reserve, sku_count) VALUES ($1,$2,$3,$4,$5)")
+        pool = await pg.get_pool()
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM app.inventory_history")
+                await conn.executemany(insert, points)
+            answer = await in_postgres.get_inventory_trend(days=90, granularity="monthly")
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM app.inventory_history")
+                await conn.executemany(insert, HISTORY)
+
+        assert answer == {
+            "labels": [last_month.strftime("%b %Y"), this_month.strftime("%b %Y")],
+            "quantity": [1001, 2000],
+            "value": [10000.23, 20000.5],
+            "reserve": [11, 20],
+            "granularity": "monthly",
+            "periodDays": 90,
+            "dataPoints": 2,
+        }
 
 
 @pytest.mark.asyncio

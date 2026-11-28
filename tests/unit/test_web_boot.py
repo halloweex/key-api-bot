@@ -12,76 +12,28 @@ Each guard names the mutation it catches.
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.helpers.access_api_startup import BOOT_SYNC, SCHEDULER, run_startup
 from tests.integration.pg_sms_seed import needs_postgres
 
 
-def _start(monkeypatch, init_and_sync):
-    """web's real `startup_event`, around the boot sync it is given; what it
-    reaches beyond the sync recorded rather than run. Returns (main,
-    restore)."""
-    import web.main as main
-    from core import store as store_module
-
-    monkeypatch.setattr(main, "validate_config", MagicMock())
-    monkeypatch.setattr(main, "init_database", MagicMock())
-    monkeypatch.setattr(main, "start_scheduler", AsyncMock())
-    monkeypatch.setattr(main, "_register_event_handlers", MagicMock())
-    monkeypatch.setattr("core.prediction_service.get_prediction_service",
-                        MagicMock(return_value=MagicMock(is_ready=True)))
-    restore = AsyncMock(return_value=False)
-    monkeypatch.setattr(store_module.AnalyticsStore, "backfill_sms_campaign_record",
-                        restore)
-    monkeypatch.setattr(main, "init_and_sync", init_and_sync)
-    # web's logger does not propagate (core.observability), so it is read
-    # where it is called.
-    monkeypatch.setattr(main, "logger", MagicMock())
-
-    async def run():
-        try:
-            await main.startup_event()
-        finally:
-            await store_module.close_store()
-
-    asyncio.run(run())
-    return main, restore
-
-
-def _said(mock) -> str:
-    return " ".join(str(c.args[0]) for c in mock.call_args_list)
-
-
 class TestTheStartup:
-    @pytest.mark.parametrize("failure", [OSError("KeyCRM is down"),
+    @pytest.mark.parametrize("failure", [None, OSError("KeyCRM is down"),
                                          RuntimeError("Postgres is down")],
-                             ids=["keycrm", "postgres"])
-    def test_a_failed_boot_sync_does_not_end_the_startup(self, monkeypatch, failure):
-        """Mutation: let the boot sync's `except` raise, or skip the rest of
-        the start after it."""
-        boot_sync = AsyncMock(side_effect=failure)
-        main, restore = _start(monkeypatch, boot_sync)
-        boot_sync.assert_awaited_once_with(full_sync_days=730)
-        main.start_scheduler.assert_awaited_once()
-        main._register_event_handlers.assert_called_once()
-        restore.assert_awaited_once()
-        assert "Serving with the boot sync failed" in _said(main.logger.warning)
-        assert "Boot sync failed on startup" in _said(main.logger.error)
-        assert "Dashboard ready" in _said(main.logger.info)
-
-    def test_a_boot_sync_that_succeeded_starts_as_ever(self, monkeypatch):
-        main, restore = _start(monkeypatch, AsyncMock())
-        main.start_scheduler.assert_awaited_once()
-        restore.assert_awaited_once()
-        assert "Boot sync done" in _said(main.logger.info)
-        assert "Serving with the boot sync failed" not in _said(main.logger.warning)
+                             ids=["succeeded", "keycrm", "postgres"])
+    def test_the_start_ends_with_the_scheduler_running(self, monkeypatch, tmp_path, failure):
+        """Whatever the boot sync did, the start completes and starts the
+        scheduler, which retries the order step. Mutation: let the boot
+        sync's `except` raise, or skip the rest of the start after it."""
+        started = run_startup(monkeypatch, tmp_path, boot_sync_fails_with=failure)
+        assert started == [BOOT_SYNC, SCHEDULER]
 
 
 KYIV = ZoneInfo("Europe/Kyiv")

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from bot import memory_watch
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 
 
 @pytest.fixture(autouse=True)
@@ -86,26 +87,42 @@ class TestPressure:
 
 class TestOomAcrossRestart:
     @pytest.mark.asyncio
-    async def test_a_kill_before_a_restart_is_still_seen(self):
-        """The kernel counter resets on recreate; the file is what remembers.
-        First tick stores oom=3; the container is recreated (counter back to
-        0 then climbs to 1) — the delta logic must not read that as clean."""
-        with patch("core.memory_monitor.read_cgroup_memory",
-                   return_value=_mem(oom=3)), \
-             patch("core.alerting.raise_alert",
-                   new=AsyncMock(return_value=2)):
-            await memory_watch.check_bot_memory()  # first ever: no previous
+    @pytest.mark.parametrize("stored, now, killed", [
+        pytest.param(0, 1, True, id="a kill since the stored sample is reported"),
+        # Read as "no previous sample", the same count would be reported
+        # again after every restart.
+        pytest.param(3, 3, False, id="an old kill is not reported again"),
+        # A count below the stored one is a recreated container, which
+        # `evaluate_memory` does not read as a kill.
+        pytest.param(3, 1, False, id="a reset counter is not a kill"),
+    ])
+    async def test_the_stored_sample_decides_whether_a_kill_is_new(
+            self, monkeypatch, tmp_path, stored, now, killed):
+        """The bot process forgets everything but its state file, and the
+        kernel's counter resets when the container is recreated: one tick
+        stores `stored`, the next, after a restart, reads `now`. A kill goes
+        to every admin and spools the diagnostician as `memory:bot:oom`."""
+        monkeypatch.setenv("KS_ALERT_AGENT", "1")
+        monkeypatch.setenv("KS_ALERT_GATE_STATE_DIR", str(tmp_path))
+        monkeypatch.delenv("KS_PG_DSN", raising=False)  # no archive: not this test's subject
+        telegram = telegram_at_the_transport(monkeypatch)
+        spool = tmp_path / "alert-tasks" / "pending"
 
-        # recreate: counter reset to 1 (one NEW kill after restart)
-        with patch("core.memory_monitor.read_cgroup_memory",
-                   return_value=_mem(oom=1)), \
-             patch("core.alerting.raise_alert",
-                   new=AsyncMock(return_value=2)) as ra:
+        with patch("core.memory_monitor.read_cgroup_memory", return_value=_mem(oom=stored)):
+            await memory_watch.check_bot_memory()
+        sent, spooled = len(telegram.messages), set(spool.glob("*.json"))
+        with patch("core.memory_monitor.read_cgroup_memory", return_value=_mem(oom=now)):
             result = await memory_watch.check_bot_memory()
-        # evaluate_memory owns the delta semantics; what this pins is that
-        # the PREVIOUS stored value reached it through the file.
-        state = json.loads(memory_watch.STATE_PATH.read_text())
-        assert state["oom_kills"] == 1
+        tasks = [json.loads(p.read_text()) for p in set(spool.glob("*.json")) - spooled]
+
+        if killed:
+            assert result["alert_sent"] == "CRITICAL"
+            assert len(telegram.messages) - sent == len(ADMINS)
+            assert [t["bucket"] for t in tasks] == ["memory:bot:oom"]
+        else:
+            assert result["alert_sent"] is None
+            assert len(telegram.messages) == sent
+            assert tasks == []
 
     @pytest.mark.asyncio
     async def test_oom_spools_the_diagnostician_without_conditions(self):

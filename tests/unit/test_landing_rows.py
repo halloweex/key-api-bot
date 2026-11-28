@@ -9,10 +9,7 @@ The tests that matter here are not the happy paths — they are the awkward
 corners, because a refactor that quietly "fixes" one of them changes production
 numbers while looking like tidying. Brand in particular: it decides which
 bucket a product's revenue lands in, and the owner presents those buckets to
-suppliers.
-
-`TestNothingChanged` replays each corner through the pre-refactor expression
-written out by hand, so the two are compared rather than asserted from memory.
+suppliers. Each corner is stated with the brand it reads as.
 """
 from __future__ import annotations
 
@@ -30,18 +27,6 @@ from core.landing_rows import (
     product_row,
     product_rows,
 )
-
-
-def _old_brand(prod_data):
-    """The expression this replaced, copied verbatim from duckdb_store.py."""
-    brand = None
-    for cf in prod_data.get("custom_fields", []):
-        if cf.get("uuid") == "CT_1001" or cf.get("name") == "Brand":
-            values = cf.get("value", [])
-            if values and isinstance(values, list):
-                brand = values[0]
-            break
-    return brand
 
 
 class TestBrand:
@@ -86,6 +71,20 @@ class TestBrand:
         ]}
         assert brand_of(p) is None, "the first match ends the search, empty or not"
 
+    def test_a_field_that_is_not_the_brand_is_passed_over(self):
+        p = {"custom_fields": [
+            {"uuid": "CT_OTHER", "value": ["x"]},
+            {"name": BRAND_FIELD_NAME, "value": ["Abib"]},
+        ]}
+        assert brand_of(p) == "Abib"
+
+    @pytest.mark.parametrize("value", [None, "NEOGEN"])
+    def test_a_value_that_is_not_a_list_is_none(self, value):
+        """KeyCRM sends the field's values as a list. A null, or a bare
+        string, is no brand, never the string itself."""
+        p = {"custom_fields": [{"uuid": BRAND_FIELD_UUID, "value": value}]}
+        assert brand_of(p) is None
+
 
 class TestCategory:
     def test_a_full_payload(self):
@@ -127,25 +126,6 @@ class TestProduct:
 
     def test_no_price_at_all_is_none(self):
         assert product_row({"id": 1}).price is None
-
-
-class TestNothingChanged:
-    """The old expression, written out by hand, against the new function."""
-
-    @pytest.mark.parametrize("payload", [
-        {},
-        {"custom_fields": []},
-        {"custom_fields": [{"uuid": "CT_1001", "value": ["NEOGEN"]}]},
-        {"custom_fields": [{"uuid": "CT_1001", "value": []}]},
-        {"custom_fields": [{"uuid": "CT_1001", "value": None}]},
-        {"custom_fields": [{"uuid": "CT_1001", "value": "NEOGEN"}]},
-        {"custom_fields": [{"name": "Brand", "value": ["Abib"]}]},
-        {"custom_fields": [{"uuid": "CT_OTHER", "value": ["x"]},
-                           {"name": "Brand", "value": ["Abib"]}]},
-        {"custom_fields": [{"uuid": "CT_1001", "value": ["A", "B"]}]},
-    ])
-    def test_brand_agrees_with_the_expression_it_replaced(self, payload):
-        assert brand_of(payload) == _old_brand(payload)
 
 
 class TestTheStoreReadsThroughIt:

@@ -53,6 +53,40 @@ def _aov(body: dict) -> dict:
             "granularity": trend.get("granularity")}
 
 
+class TestTheTrend:
+    @pytest.mark.asyncio
+    async def test_all_time_by_month_runs_from_the_first_order(self, shop):
+        """The whole history by month: a point a month from December 2023,
+        the first order's month, each month its days' sums, and no
+        comparison, whatever was asked. Mutation: drop `granularity` on its
+        way from the route to the store, or start the period elsewhere."""
+        async with signed_in("viewer") as visitor:
+            r = await visitor.get("/api/revenue/trend", params={
+                "period": "all_time", "granularity": "monthly",
+                "compare_type": "year_ago"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["labels"][:4] == ["12.2023", "01.2024", "02.2024", "03.2024"]
+        assert body["revenue"][:4] == [0, 1100.0, 300.0, 0]
+        assert body["orders"][:4] == [0, 11, 3, 0]
+        assert "comparison" not in body
+
+    @pytest.mark.asyncio
+    async def test_all_time_carries_no_comparison_and_a_month_does(self, shop):
+        """By day too: the whole history has nothing before it to set beside
+        it, so the trend carries no comparison; a month carries one.
+        Mutation: let `all_time` ask for the comparison."""
+        async with signed_in("viewer") as visitor:
+            whole = await visitor.get("/api/revenue/trend", params={
+                "period": "all_time", "compare_type": "year_ago"})
+            month = await visitor.get("/api/revenue/trend", params={
+                "period": "month", "compare_type": "year_ago"})
+        assert whole.status_code == 200, whole.text
+        assert "comparison" not in whole.json()
+        assert month.status_code == 200, month.text
+        assert "comparison" in month.json()
+
+
 class TestTheAovByMonth:
     @pytest.mark.asyncio
     async def test_a_months_aov_is_its_revenue_over_its_orders(self, shop):

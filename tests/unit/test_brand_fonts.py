@@ -7,9 +7,9 @@ headline number, and would be a row of boxes anywhere else.
 
 Pillow has no font fallback and draws a missing glyph as `.notdef`, silently.
 So the gap is measured here rather than assumed, from the files that actually
-ship, and `brand.FALLBACK_CHARS` is asserted to be exactly that gap: too small
-and the report grows empty boxes, too large and characters are routed to a
-face nobody asked for.
+ship: every character a picture can draw has to land, through the run
+splitter, in a face with a real glyph for it. An empty box is the failure,
+whichever part of the routing put it there.
 
 `.notdef` is detected by rendering a private-use codepoint no font maps and
 comparing masks — fontTools would be cleaner and is not in the CI lock.
@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from core import brand
+from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.i18n import LANGUAGES, fmt_int, fmt_money, fmt_window, t
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,8 +58,7 @@ def _drawable_alphabet() -> set:
             "report.effect_check_down", "report.effect_check_up",
             "card.orders", "card.avg_check", "card.new_repeat",
             *(f"weekday.{n}" for n in range(7)),
-            *(f"report.sales_type.{n}"
-              for n in ("retail", "b2b", "internal", "exhibition", "all")),
+            *(f"report.sales_type.{n}" for n in (*KNOWN_SALES_TYPES, "all")),
         ):
             chars |= set(t(key, lang))
             chars |= set(t(key, lang).upper())
@@ -96,23 +96,31 @@ class TestTheFilesShip:
 
 
 class TestCoverage:
-    def test_the_fallback_set_is_exactly_what_libre_franklin_lacks(self):
-        """The one assertion this file exists for. Computed from the shipped
-        file over the alphabet the pictures can draw."""
-        has = _renders(_face(brand.brand_font("body")))
-        missing = {c for c in _drawable_alphabet() if not has(c)}
-        assert missing == set(brand.FALLBACK_CHARS), {
-            "missing but not routed": sorted(missing - set(brand.FALLBACK_CHARS)),
-            "routed but not missing": sorted(set(brand.FALLBACK_CHARS) - missing),
-        }
+    def test_every_character_a_picture_draws_lands_in_a_face_that_has_it(self):
+        """The one assertion this file exists for: no empty box on a picture.
+        Every character a label can carry, set in the body face, and every
+        character of a headline number, set in the accent serif, is routed by
+        `_runs` to a face with a real glyph for it — measured on the shipped
+        files, not on a list of what they lack."""
+        from core.weekly_report_image import _fallback_face, _load_fonts, _runs
 
-    def test_the_accent_serif_covers_the_one_thing_it_sets(self):
-        """`big` draws the headline number and nothing else — no Cyrillic and
-        no ₴, both of which this face lacks."""
-        has = _renders(_face(brand.brand_font("accent")))
-        for lang in LANGUAGES:
-            for ch in fmt_int(1_234_567, lang):
-                assert has(ch), f"{ch!r} of a {lang} number is not in the serif"
+        fonts = _load_fonts()
+        if fonts is None:
+            pytest.skip("no fonts on this host")
+        if _fallback_face(fonts.label.size) is None:
+            pytest.skip("no DejaVu on this host")
+        drawn = [(fonts.label, _drawable_alphabet())] + [
+            (fonts.big, set(fmt_int(1_234_567, lang))) for lang in LANGUAGES]
+        glyphs = {}  # one `.notdef` measurement per face
+        boxes = []
+        for font, chars in drawn:
+            for ch in sorted(chars):
+                for _run, face in _runs(ch, font):
+                    if id(face) not in glyphs:
+                        glyphs[id(face)] = _renders(face)
+                    if not glyphs[id(face)](ch):
+                        boxes.append((ch, " ".join(face.getname())))
+        assert boxes == []
 
     def test_the_accent_serif_would_not_do_for_anything_else(self):
         """Pinned so nobody widens its role by eye: this is *why* the ₴ beside
@@ -121,30 +129,8 @@ class TestCoverage:
         assert not has("₴")
         assert not has("Ж")
 
-    def test_the_fallback_face_covers_what_the_brand_faces_do_not(self):
-        from core.weekly_report_image import _fallback_face
-
-        spare = _fallback_face(40)
-        if spare is None:
-            pytest.skip("no DejaVu on this host")
-        has = _renders(spare)
-        for ch in brand.FALLBACK_CHARS:
-            assert has(ch), f"the fallback face cannot draw {ch!r} either"
-
 
 class TestRunSplitting:
-    def test_every_character_lands_in_a_face_that_can_draw_it(self):
-        from core.weekly_report_image import _load_fonts, _runs
-
-        fonts = _load_fonts()
-        if fonts is None:
-            pytest.skip("no fonts on this host")
-        text = "▼ 28.1% против прошлой недели ▲ ₴ 805 788"
-        for run, face in _runs(text, fonts.label):
-            has = _renders(face)
-            for ch in run:
-                assert has(ch), f"{ch!r} was routed to a face without it"
-
     def test_a_string_without_arrows_is_not_split(self):
         """The split costs a draw call per run; text that does not need it
         must not pay."""

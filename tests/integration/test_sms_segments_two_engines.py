@@ -8,7 +8,9 @@ ordering, how a window function breaks a tie, what `ROUND` does at .005.
 
 So this ran the real thing on both: the same synthetic customers in a DuckDB
 store and a live PostgreSQL, both renderings executed, the rosters compared
-row by row.
+row by row. The rosters are asked of the store's own `get_sms_segments` now,
+which renders the query itself: a test that assembled the fragments would
+hand it a query the store never builds.
 
 ONE ENGINE SINCE STEP 14 (S14-08)
 
@@ -37,7 +39,6 @@ import pytest
 import pytest_asyncio
 
 from core.repositories.customers import DlrEventRebound, SmsAudienceFilters
-from core.sql_dialect import POSTGRES, numbered, sms_segments_select
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import (
     golden, kyiv_today, needs_postgres, relative, same_numbers, shifted,
@@ -94,21 +95,38 @@ BUYERS = [
 OPTOUTS = [(4, "sms", "380504444444")]
 
 CASES = [
-    ("rfm, revenue basis", SmsAudienceFilters(), "revenue_ltv", "retail", (), "rfm"),
-    ("single arm, margin basis", SmsAudienceFilters(), "margin_ltv", "retail", (),
+    ("rfm, revenue basis", SmsAudienceFilters(), "revenue", "retail", (), "rfm"),
+    ("single arm, margin basis", SmsAudienceFilters(), "margin", "retail", (),
      "single"),
     ("brand filter (the content EXISTS)", SmsAudienceFilters(brands=("Cosrx",)),
-     "revenue_ltv", "retail", (), "single"),
+     "revenue", "retail", (), "single"),
     ("category matches the whole branch", SmsAudienceFilters(category_ids=(10,)),
-     "revenue_ltv", "retail", (), "single"),
+     "revenue", "retail", (), "single"),
     ("city and order count", SmsAudienceFilters(cities=("Київ",), orders_min=2),
-     "revenue_ltv", "retail", (), "single"),
-    ("one level only", SmsAudienceFilters(), "revenue_ltv", "retail", ("VIP",), "rfm"),
-    ("promocode", SmsAudienceFilters(promocode="aug"), "revenue_ltv", "retail", (),
+     "revenue", "retail", (), "single"),
+    ("one level only", SmsAudienceFilters(), "revenue", "retail", ("VIP",), "rfm"),
+    ("promocode", SmsAudienceFilters(promocode="aug"), "revenue", "retail", (),
      "single"),
-    ("sales_type=all lets b2b in", SmsAudienceFilters(), "revenue_ltv", "all", (),
+    ("sales_type=all lets b2b in", SmsAudienceFilters(), "revenue", "all", (),
      "single"),
 ]
+
+# The level cut-offs every recorded roster was drawn with — VIP from ₴5 000,
+# CORE from two orders or ₴2 000, REACTIVATION within 120 days — inside the
+# 270-day window.
+CUT_OFFS = dict(vip_ltv=5000, core_min_orders=2, core_ltv=2000,
+                reactivation_max_recency=120, max_recency_days=270)
+
+# A recorded roster row is the audience query's projection: the customer, in
+# the order the store names each field below, then the funnel's counts.
+ROSTER_FIELDS = ("buyerId", "fullName", "phone", "city", "tier", "orders", "ltv",
+                 "avgOrderValue", "revenueLtv", "marginLtv", "marginPct",
+                 "costCoverage", "recencyDays", "lastOrderDate", "firstOrderDate",
+                 "lastOrderId", "lastOrderTotal", "lastOrderItemCount",
+                 "lastOrderItems")
+FUNNEL_COLUMNS = (("customers", 19), ("inWindow", 20), ("filtered", 21),
+                  ("tiered", 22), ("phone", 23), ("subscribed", 24),
+                  ("reachable", 27), ("uniquePhone", 25))
 
 
 def _day(text: str) -> date:
@@ -120,43 +138,12 @@ def _instant(text: str, hour: int) -> datetime:
     return datetime.combine(_day(text), time(hour), timezone.utc)
 
 
-def _render(filters, ltv_column, sales_type, tiers, grouping):
-    tier_case = f"""CASE
-        WHEN c.{ltv_column} >= ? THEN 'VIP'
-        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
-        WHEN c.recency <= ? THEN 'REACTIVATION' END"""
-    filter_sql, filter_params = filters.predicate(
-        ltv_column, sales_type, POSTGRES.order_lines,
-    )
-    sql = sms_segments_select(
-        POSTGRES,
-        ltv_column=ltv_column,
-        sales_type_filter="" if sales_type == "all" else "AND l.sales_type = ?",
-        tier_case=tier_case,
-        arm_expr="'ALL'" if grouping == "single" else "tier_level",
-        ok_tier_expr="TRUE" if grouping == "single" else "tier_level IS NOT NULL",
-        group_predicates=[filter_sql],
-        tier_subset=(f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
-                     if tiers else ""),
-    )
-    params: list = []
-    if sales_type != "all":
-        params.append(sales_type)
-    params += [5000.0, 2, 2000.0, 120, 270]
-    params += filter_params
-    params += list(tiers)
-    return numbered(sql), params
-
-
-def _comparable(rows):
-    """Money as float at two decimals — the form the rows were compared in
-    while there were two engines, and recorded in."""
-    out = []
-    for row in rows:
-        out.append(tuple(
-            round(float(v), 2) if hasattr(v, "as_tuple") else v for v in row
-        ))
-    return out
+async def _audience(store, filters, ltv_basis, sales_type, tiers, grouping) -> dict:
+    """The audience the wizard previews, under the recorded cut-offs."""
+    return _now(await store.get_sms_segments(
+        **CUT_OFFS, sales_type=sales_type, ltv_basis=ltv_basis, tier=tiers or None,
+        filters=filters, grouping=grouping, include_customers=True,
+    ))
 
 
 def _now(value):
@@ -208,34 +195,36 @@ async def engine(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "label,filters,ltv_column,sales_type,tiers,grouping", CASES,
+    "label,filters,ltv_basis,sales_type,tiers,grouping", CASES,
     ids=[c[0] for c in CASES],
 )
 async def test_the_roster_is_the_one_duckdb_returned(
-    engine, label, filters, ltv_column, sales_type, tiers, grouping,
+    engine, label, filters, ltv_basis, sales_type, tiers, grouping,
 ):
-    _store, pool = engine
-    sql, params = _render(filters, ltv_column, sales_type, tiers, grouping)
+    store, _pool = engine
+    recorded = GOLDEN[f"roster:{label}"]
 
-    async with pool.acquire() as conn:
-        rows = [tuple(r) for r in await conn.fetch(sql, *params)]
+    audience = await _audience(store, filters, ltv_basis, sales_type, tiers, grouping)
 
-    assert _now(_comparable(rows)) == GOLDEN[f"roster:{label}"], (
-        f"Postgres disagrees with DuckDB's {label} audience"
-    )
+    assert [{field: c[field] for field in ROSTER_FIELDS}
+            for c in audience["customers"]] == [
+        dict(zip(ROSTER_FIELDS, row)) for row in recorded], (
+        f"the {label} audience is not the one DuckDB returned")
+    assert audience["funnel"] == [
+        {"stage": stage, "remaining": recorded[0][column]}
+        for stage, column in FUNNEL_COLUMNS]
 
 
 @pytest.mark.asyncio
 async def test_the_fixture_actually_exercises_the_exclusions(engine):
     """A roster that agrees on easy data proves nothing, so this asserts the
     awkward rows really are being excluded — otherwise the agreement above
-    could be both engines returning everybody."""
-    _store, pool = engine
-    sql, params = _render(SmsAudienceFilters(), "revenue_ltv", "retail", (), "single")
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *params)
+    could be the store returning everybody."""
+    store, _pool = engine
+    audience = await _audience(store, SmsAudienceFilters(), "revenue", "retail", (),
+                               "single")
 
-    selected = {r[0] for r in rows if r[0] is not None}
+    selected = {c["buyerId"] for c in audience["customers"]}
     assert 4 not in selected, "an opted-out customer was messaged"
     assert 5 not in selected, "a b2b order leaked into a retail audience"
     assert 6 not in selected, "a return counted as a purchase"

@@ -199,6 +199,23 @@ PROFIT_SINCE_2026_11_27 = {
 }
 
 
+def _without_styling(value):
+    """The answer with every chart dataset reduced to its `label` and `data`.
+
+    The profit chart's datasets and the expense trend's carry Chart.js styling
+    beside the numbers (`borderColor`, `backgroundColor`, `fill`, `tension`,
+    `borderWidth`) — a colour changed is not money changed, so it is not
+    compared. The pie's colours (`byType.backgroundColor`) are not a dataset's
+    and stay: the page colours each expense type by them."""
+    if isinstance(value, dict):
+        return {key: ([{"label": d["label"], "data": d["data"]} for d in item]
+                      if key == "datasets" else _without_styling(item))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_styling(item) for item in value]
+    return value
+
+
 def _expected(key):
     """The recorded literal, with the values the decision moved."""
     import copy
@@ -222,7 +239,8 @@ class TestPostgresAnswersWhatDuckDBAnswered:
     )
     async def test_the_whole_result_is_the_literal(self, in_postgres, name, args, kwargs):
         answer = await getattr(in_postgres, name)(*args, **kwargs)
-        assert comparable(answer) == _expected(_key(name, args, kwargs)), (
+        assert (_without_styling(comparable(answer))
+                == _without_styling(_expected(_key(name, args, kwargs)))), (
             f"{name}{args}{kwargs}: {answer!r}")
 
     def test_every_literal_is_a_call_and_every_call_has_one(self):
