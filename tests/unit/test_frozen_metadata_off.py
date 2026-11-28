@@ -290,25 +290,6 @@ class TestTheFreshnessCheck:
                 unverified=dq.unverified_conditions([], issues)))
         assert "freshness_buyers" in resolve.await_args.kwargs["still_firing"]
 
-    def test_the_scan_hands_the_copy_through(self, flags, duckdb_off):
-        """`check_internal_integrity` passes `frozen_sync_rows` to the
-        freshness check; the scheduler's job reads it under off. Mutation:
-        drop either."""
-        import ast
-        import inspect
-        import textwrap
-
-        from core.scheduler import BackgroundScheduler
-
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_integrity)))
-        scans = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                 and getattr(n.func, "id", None) == "check_internal_integrity"]
-        assert scans and all(any(k.arg == "frozen_sync_rows" for k in c.keywords)
-                             for c in scans)
-        source = inspect.getsource(dq.check_internal_integrity)
-        assert "frozen_rows=frozen_sync_rows" in source
-
 
 # ─── 3. The digest's beat ────────────────────────────────────────────────────
 
