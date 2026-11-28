@@ -130,9 +130,14 @@ class TestChain6sProductsKeyIsSimplyDue:
         import asyncpg
         import httpx
 
+        from core import pg
         from core.keycrm import KeyCRMClient
         from core.store import AnalyticsStore
         from core.sync_service import SyncService
+
+        # The store asks core.pg for its pool, which caches one per process:
+        # an earlier test's pool is bound to a loop that is closed by now.
+        monkeypatch.setattr(pg, "_pool", None)   # its own pool, closed below
 
         def products(request: httpx.Request):
             if request.url.path.rstrip("/").endswith("/products"):
@@ -159,6 +164,7 @@ class TestChain6sProductsKeyIsSimplyDue:
             finally:
                 await conn.execute("DELETE FROM bronze.products WHERE id BETWEEN 990000 AND 990999")
                 await conn.close()
+                await pg.close_pool()
         assert [r["id"] for r in held] == [990_001, 990_002, 990_003]
         assert key is not None
         assert stats["products"] == 3
