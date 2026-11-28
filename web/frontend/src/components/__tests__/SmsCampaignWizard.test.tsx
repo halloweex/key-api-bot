@@ -792,13 +792,19 @@ describe('the draft', () => {
   })
 
   it('is cleared once the roster is frozen', async () => {
-    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    const { unmount } = render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    await nameCampaign()
+    await nameCampaign('sep-brand')
+    await pickTier('VIP')
     await freeze()
+    unmount()
 
-    expect(sessionStorage.getItem('sms.campaignDraft.v2')).toBeNull()
-    expect(sessionStorage.getItem('sms.campaignDraft.v1')).toBeNull()
+    // Coming back opens a fresh draft, not the campaign that already exists.
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    expect(nameField().value).not.toBe('sep-brand')
+    expect(
+      screen.getByRole('button', { name: /sms\.tier\.VIP/ }).getAttribute('aria-pressed'),
+    ).not.toBe('true')
   })
 
   it('opens a draft written before conditions, as conditions', async () => {

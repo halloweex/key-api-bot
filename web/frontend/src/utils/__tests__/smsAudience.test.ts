@@ -6,6 +6,7 @@ import {
   emptyAudience,
   MAX_WINDOW_DAYS,
 } from '../smsAudience'
+import { daysBetween, kyivToday } from '../smsDates'
 import type { SmsAudienceCriteria, SmsAudienceFilters } from '../../types/api'
 
 /** An audience of one group — what every audience was before groups. */
@@ -160,12 +161,12 @@ describe('the base window', () => {
   })
 
   it('reaches as far as the server allows, which is all time', () => {
-    // The page no longer shows a window: a group with no "last order"
-    // condition sends the ceiling, and the ceiling covers the whole history.
-    expect(ALL_TIME_DAYS).toBe(MAX_WINDOW_DAYS)
-    expect(MAX_WINDOW_DAYS).toBe(3650)
-    const p = new URLSearchParams(audienceToParams(oneGroup({}, {}, ALL_TIME_DAYS)))
-    expect(p.get('max_recency_days')).toBe('3650')
+    // The page shows no window: a group with no "last order" condition sends
+    // ALL_TIME_DAYS, so it must reach KeyCRM's first order (2023-12-02).
+    // 2026-10-17: a 270-day window cut January off a campaign. How that value
+    // is sent is covered by smsConditions.test.ts.
+    expect(daysBetween('2023-12-02', kyivToday())).toBeLessThanOrEqual(ALL_TIME_DAYS)
+    expect(ALL_TIME_DAYS).toBeLessThanOrEqual(MAX_WINDOW_DAYS)
   })
 
   it('comes back from a preset, and falls back when one predates it', () => {

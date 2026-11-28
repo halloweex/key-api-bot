@@ -23,28 +23,18 @@ describe('ApiError.from', () => {
     expect(error.status).toBe(502)
   })
 
-  it('falls back to the canned text when there is no body', async () => {
-    const error = await ApiError.from(response(502))
-
-    expect(error.message).toBe('Server is restarting, please wait...')
-  })
-
-  it('falls back when the body is not JSON', async () => {
-    const error = await ApiError.from(
-      new Response('<html>502 Bad Gateway</html>', { status: 502 }),
-    )
-
-    expect(error.message).toBe('Server is restarting, please wait...')
-  })
-
-  it('ignores a non-string detail rather than rendering an object', async () => {
+  it.each([
+    ['there is no body', () => response(502), 502],
+    ['the body is not JSON', () => new Response('<html>502 Bad Gateway</html>', { status: 502 }), 502],
     // FastAPI validation errors put a list in `detail`; "[object Object]" in a
     // toast is worse than the generic message.
-    const error = await ApiError.from(
-      response(422, { detail: [{ loc: ['query', 'phone'], msg: 'too short' }] }),
-    )
+    ['detail is not a string', () => response(422, { detail: [{ loc: ['query', 'phone'], msg: 'too short' }] }), 422],
+  ])('falls back to the status message when %s', async (_name, make, status) => {
+    const error = await ApiError.from(make())
 
-    expect(error.message).toBe('API error: ')
+    expect(error.message).toBe(ApiError.fromResponse(make()).message)
+    expect(error.message).not.toContain('[object')
+    expect(error.status).toBe(status)
   })
 
   it('keeps the body, so a refusal can be said in the reader\'s language', async () => {

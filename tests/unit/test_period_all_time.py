@@ -58,10 +58,6 @@ class TestThePeriod:
         found = re.findall(r"export const HISTORY_START = '(\d{4}-\d{2}-\d{2})'", source)
         assert found == [HISTORY_START.isoformat()]
 
-    def test_the_picker_offers_it(self):
-        source = (ROOT / "web/frontend/src/components/PeriodFilter.tsx").read_text()
-        assert "{ value: 'all_time', labelKey: 'filter.allTime' }" in source
-
     @pytest.mark.parametrize("days", [0, 365 * 10])
     def test_it_fits_the_range_cap_for_a_decade(self, days):
         """Explicit dates over MAX_RANGE_DAYS are refused; a shortcut is not

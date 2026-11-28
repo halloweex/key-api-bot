@@ -47,8 +47,16 @@ describe('the filters each section applies', () => {
   })
 
   it('leaves every other page every filter', () => {
-    expect(filtersForPath('/products').size).toBe(6)
-    expect(filtersForPath('/').has('salesType')).toBe(true)
+    const sections = new Set(['/traffic', '/traffic/sales', '/traffic/campaigns'].flatMap((p) => [...filtersForPath(p)]))
+    for (const page of ['/products', '/']) {
+      const filters = filtersForPath(page)
+      // The ones /traffic never applies are still on every other page.
+      for (const name of ['categoryId', 'brand', 'promocode'] as const) {
+        expect(sections.has(name)).toBe(false)
+        expect(filters.has(name)).toBe(true)
+      }
+      expect(filters.has('salesType')).toBe(true)
+    }
   })
 })
 

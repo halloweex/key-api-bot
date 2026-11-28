@@ -26,15 +26,23 @@ vi.mock('react-i18next', () => ({
   }),
 }))
 
-const results = vi.hoisted(() => ({ current: null as SmsCampaignResultsResponse | null }))
+const results = vi.hoisted(() => ({
+  current: null as SmsCampaignResultsResponse | null,
+  /** The campaign name each read asked for, in order. */
+  asked: [] as (string | null)[],
+}))
 
 vi.mock('../../hooks/useApi', () => ({
   useSmsCampaigns: () => ({
     data: { campaigns: [{ campaign: 'aug-promo', sentAt: '2026-08-05T15:03:00Z' }] },
   }),
-  useSmsCampaignResults: () => ({
-    data: results.current, isLoading: false, error: null,
-  }),
+  useSmsCampaignResults: (campaign: string | null) => {
+    results.asked.push(campaign)
+    // Data comes back only for the campaign it belongs to, as the server does.
+    const data = results.current && results.current.campaign === campaign
+      ? results.current : null
+    return { data, isLoading: false, error: null }
+  },
 }))
 
 import { SmsCampaignResults } from '../SmsCampaignResults'
@@ -71,6 +79,7 @@ function response(over: Partial<SmsCampaignResultsResponse> = {}): SmsCampaignRe
 
 function renderWith(data: SmsCampaignResultsResponse) {
   results.current = data
+  results.asked.length = 0
   return render(<SmsCampaignResults />)
 }
 
@@ -333,7 +342,10 @@ describe('SmsCampaignResults, read by someone who is not a statistician', () => 
     // The one comparison a reader makes unaided — ₴90 a head against ₴750 —
     // and it was on the page nowhere: arms carried a conversion rate only.
     renderWith(response())
-    expect(screen.getAllByText('sms.perPerson').length).toBeGreaterThanOrEqual(2)
+    const overall = screen.getAllByRole('row')[1]
+    // Both arms earned 90 000: over 1 000 messaged, over 120 held back.
+    expect(within(overall).getByText('₴90')).toBeInTheDocument()
+    expect(within(overall).getByText('₴750')).toBeInTheDocument()
   })
 
   it('keeps the statistics one click away rather than first', () => {
@@ -356,8 +368,11 @@ describe('SmsCampaignResults, read by someone who is not a statistician', () => 
   it('reads the campaign it is told to read', () => {
     // The list drives this from above; without the prop the block still picks
     // its own, which is what every test above relies on.
-    results.current = response()
+    results.current = response({ campaign: 'jul-promo' })
+    results.asked.length = 0
     render(<SmsCampaignResults campaign="jul-promo" />)
+    // The list's own first campaign is aug-promo; the prop must win over it.
+    expect(new Set(results.asked)).toEqual(new Set(['jul-promo']))
     expect(screen.getByText(/sms\.headlineApparent/)).toBeInTheDocument()
   })
 })
