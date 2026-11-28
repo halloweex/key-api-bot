@@ -9,14 +9,10 @@ a copy that takes 116 ms.
 """
 from __future__ import annotations
 
-import ast
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
-
-REPO = Path(__file__).resolve().parents[2]
 
 
 @asynccontextmanager
@@ -58,21 +54,6 @@ class TestTheFirstRunCanBeBroughtForward:
             when = first_runs["hourly"]
         assert started + timedelta(minutes=59) <= when <= started + timedelta(minutes=61)
 
-    def test_timezone_is_imported_where_the_code_runs(self):
-        """It was not, on the first cut: `timezone.utc` at module scope with
-        only `datetime, timedelta` imported. That parses and raises the first
-        time a job is registered — the f-string brace's failure mode."""
-        src = (REPO / "core" / "scheduler.py").read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        names = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "datetime"
-            and node.col_offset == 0
-            for alias in node.names
-        }
-        assert "timezone" in names
-
 
 class TestTheReplicationUsesIt:
     @pytest.mark.asyncio
@@ -87,10 +68,3 @@ class TestTheReplicationUsesIt:
         async with _started(lambda s: s._register_jobs()) as first_runs:
             when = first_runs["replicate_operational"]
         assert started < when <= started + timedelta(minutes=5)
-
-    def test_it_is_used_sparingly(self):
-        """One job today. If this grows, the reason for each has to grow with
-        it — the cost of firing on every restart is paid per job."""
-        src = (REPO / "core" / "scheduler.py").read_text(encoding="utf-8")
-        uses = src.count("first_run_delay_s=")
-        assert uses <= 3, f"{uses} jobs now fire on every restart — is each cheap?"

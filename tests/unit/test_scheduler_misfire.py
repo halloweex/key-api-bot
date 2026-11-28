@@ -74,24 +74,44 @@ class TestMisfireGrace:
         assert sorted(missed) == []
         assert ran == jobs
 
-    def test_grace_can_be_overridden_per_job(self):
-        added = []
+    @pytest.mark.asyncio
+    async def test_grace_can_be_overridden_per_job(self):
+        """A job registered with its own grace is dropped when its turn comes
+        later than that, and run when it comes sooner; a job with no override
+        keeps the generous default, so the override is what decided."""
+        from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-        class FakeScheduler:
-            def add_job(self, func, **kwargs):
-                added.append(kwargs)
+        from core.scheduler import SCHEDULER_TIMEZONE
 
-            def get_job(self, job_id):
-                return None
+        s = BackgroundScheduler()
+        s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
+        for job_id, extra in (("tight_in_time", {"misfire_grace_time": 30}),
+                              ("tight_too_late", {"misfire_grace_time": 30}),
+                              ("default_late", {})):
+            s._add_job(job_id=job_id, name=job_id, description="d", func=_probe,
+                       trigger=IntervalTrigger(hours=1), **extra)
+        ran, missed = set(), set()
+        s._scheduler.add_listener(lambda e: ran.add(e.job_id), EVENT_JOB_EXECUTED)
+        s._scheduler.add_listener(lambda e: missed.add(e.job_id), EVENT_JOB_MISSED)
+        s._scheduler.start(paused=True)
+        try:
+            now = datetime.now(timezone.utc)
+            for job_id, late_s in (("tight_in_time", 10), ("tight_too_late", 90),
+                                   ("default_late", 90)):
+                s._scheduler.modify_job(
+                    job_id, func=_probe,
+                    next_run_time=now - timedelta(seconds=late_s))
+            s._scheduler.resume()
+            for _ in range(1000):
+                if len(ran | missed) == 3:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            s._scheduler.shutdown(wait=False)
 
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = FakeScheduler()
-        scheduler._add_job(
-            job_id="x", name="X", description="d", func=lambda: None,
-            trigger=IntervalTrigger(minutes=2), misfire_grace_time=30,
-        )
-
-        assert added[0]["misfire_grace_time"] == 30
+        assert ran == {"tight_in_time", "default_late"}
+        assert missed == {"tight_too_late"}
 
 
 class TestInvariantJobsUseCron:
@@ -201,42 +221,35 @@ class TestNextRunReporting:
     "this job will never fire".
     """
 
-    def _scheduler_with_job(self, next_run_time):
-        from core.scheduler import JobInfo
+    @pytest.mark.asyncio
+    async def test_every_registered_job_reports_when_it_fires_next(self):
+        """Production's registration on a started scheduler: no job, cron or
+        interval, is reported as never firing before its first run."""
+        s = await _registered()
+        s._scheduler.start(paused=True)
+        try:
+            jobs = s.get_jobs()
+            live = {job.id: job.next_run_time for job in s._scheduler.get_jobs()}
+        finally:
+            s._scheduler.shutdown(wait=False)
 
-        class FakeJob:
-            trigger = "cron[hour='9', minute='0']"
+        assert jobs, "nothing registered: has the registry moved?"
+        assert [j["id"] for j in jobs if j["next_run"] is None] == []
+        for j in jobs:
+            assert j["next_run"] == live[j["id"]].isoformat()
 
-            def __init__(self, nrt):
-                self.next_run_time = nrt
+    @pytest.mark.asyncio
+    async def test_a_job_the_scheduler_holds_no_time_for_reports_the_last_known_one(self):
+        """A paused job has no next run in APScheduler; the listing then
+        shows the value last recorded for it rather than nothing."""
+        s = await _registered()
+        s._scheduler.start(paused=True)
+        try:
+            cached = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
+            s._scheduler.pause_job("dq_digest")
+            s._job_info["dq_digest"].next_run = cached
+            reported = {j["id"]: j["next_run"] for j in s.get_jobs()}
+        finally:
+            s._scheduler.shutdown(wait=False)
 
-        class FakeScheduler:
-            def __init__(self, job):
-                self._job = job
-
-            def get_job(self, job_id):
-                return self._job
-
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = FakeScheduler(FakeJob(next_run_time))
-        scheduler._job_info["dq_digest"] = JobInfo(
-            id="dq_digest", name="DQ: Daily Digest", description="d",
-        )
-        return scheduler
-
-    def test_next_run_comes_from_the_live_scheduler(self):
-        from datetime import datetime, timezone
-
-        when = datetime(2026, 8, 9, 9, 0, tzinfo=timezone.utc)
-        jobs = self._scheduler_with_job(when).get_jobs()
-
-        assert jobs[0]["next_run"] == when.isoformat()
-
-    def test_falls_back_to_the_cached_value(self):
-        from datetime import datetime, timezone
-
-        scheduler = self._scheduler_with_job(None)
-        cached = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
-        scheduler._job_info["dq_digest"].next_run = cached
-
-        assert scheduler.get_jobs()[0]["next_run"] == cached.isoformat()
+        assert reported["dq_digest"] == cached.isoformat()
