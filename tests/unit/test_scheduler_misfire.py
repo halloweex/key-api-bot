@@ -12,40 +12,67 @@ scheduler start — so every deploy pushed a six-hour job six hours further out.
 `CronTrigger` computes from the wall clock and is immune, which is why the daily
 cron reconciliation managed 68/79 days while the interval jobs managed 6.
 """
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import pytest
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from core.scheduler import (
-    DEFAULT_MISFIRE_GRACE_SECONDS,
     INVARIANT_CHECK_HOURS,
     BackgroundScheduler,
 )
 
 
+async def _registered():
+    """Every production job, registered on a real scheduler not yet started."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    s = BackgroundScheduler()
+    s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
+    await s._register_jobs()
+    return s
+
+
+async def _probe():
+    """In each job's place, so no job's body runs."""
+    return None
+
+
 class TestMisfireGrace:
-    def test_grace_is_generous_enough_to_outlast_a_heavy_job(self):
-        """Reconciliation runs 119s median / 210s max and holds the heavy lock.
-        A grace shorter than that drops whatever is due while it runs."""
-        assert DEFAULT_MISFIRE_GRACE_SECONDS >= 3600
+    @pytest.mark.asyncio
+    async def test_every_job_still_runs_when_its_turn_comes_ten_minutes_late(self):
+        """The incident: runs dropped as missed for being 1.8 s late, because
+        APScheduler's grace is one second unless a job is given another. A
+        turn that comes while a heavy job holds things up (reconciliation:
+        119 s median, 210 s max), here ten minutes late, still runs — for
+        every job production registers, its body replaced by a probe."""
+        from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 
-    def test_every_job_is_registered_with_an_explicit_grace(self, monkeypatch):
-        added = []
+        s = await _registered()
+        ran, missed = set(), set()
+        s._scheduler.add_listener(lambda e: ran.add(e.job_id), EVENT_JOB_EXECUTED)
+        s._scheduler.add_listener(lambda e: missed.add(e.job_id), EVENT_JOB_MISSED)
+        s._scheduler.start(paused=True)
+        try:
+            jobs = {job.id for job in s._scheduler.get_jobs()}
+            late = datetime.now(timezone.utc) - timedelta(minutes=10)
+            for job_id in jobs:
+                s._scheduler.modify_job(job_id, func=_probe, next_run_time=late)
+            s._scheduler.resume()
+            for _ in range(1000):
+                if ran | missed >= jobs:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            s._scheduler.shutdown(wait=False)
 
-        class FakeScheduler:
-            def add_job(self, func, **kwargs):
-                added.append(kwargs)
-
-            def get_job(self, job_id):
-                return None
-
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = FakeScheduler()
-        scheduler._add_job(
-            job_id="x", name="X", description="d",
-            func=lambda: None, trigger=IntervalTrigger(minutes=2),
-        )
-
-        assert added[0]["misfire_grace_time"] == DEFAULT_MISFIRE_GRACE_SECONDS
+        assert jobs, "nothing registered: has the registry moved?"
+        assert sorted(missed) == []
+        assert ran == jobs
 
     def test_grace_can_be_overridden_per_job(self):
         added = []
@@ -104,14 +131,19 @@ class TestInvariantJobsUseCron:
         assert usual > 0
         assert {day: n for day, n in runs.items() if n != usual} == {}
 
-    def test_no_six_hourly_interval_triggers_survive(self):
-        """The trigger type is the bug, not the interval length."""
-        import inspect
-
-        import core.scheduler as mod
-
-        source = inspect.getsource(mod.BackgroundScheduler._register_jobs)
-        assert "IntervalTrigger(hours=6)" not in source
+    @pytest.mark.asyncio
+    async def test_no_job_of_six_hours_or_more_counts_from_its_registration(self):
+        """The trigger type is the bug, not the interval length: an interval
+        counts from registration, every deploy registers afresh, and the
+        six-hourly scan ran 6 times in 79 days. Read off the triggers
+        production registers, however the interval is spelt."""
+        jobs = (await _registered())._scheduler.get_jobs()
+        assert jobs, "nothing registered: has the registry moved?"
+        long_intervals = sorted(
+            job.id for job in jobs
+            if isinstance(job.trigger, IntervalTrigger)
+            and job.trigger.interval >= timedelta(hours=6))
+        assert long_intervals == []
 
     def test_cron_next_fire_does_not_move_when_re_registered(self):
         """The property that makes Cron immune to the deploy reset: its next

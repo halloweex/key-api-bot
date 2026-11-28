@@ -153,11 +153,34 @@ class TestTheTwoSpellingsStayApart:
     """The zone is named the same way everywhere it can be, and differently
     only where an engine refuses the shared form."""
 
-    def test_duckdb_and_postgres_share_one_expression(self):
-        """(DuckDB's analytics dialect said `TODAY_IN_KYIV` too, until step
-        14's S14-07 took it.)"""
-        assert "AT TIME ZONE" in TODAY_IN_KYIV
-        assert DISPLAY_TIMEZONE in TODAY_IN_KYIV
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_postgres_says_kyivs_day_whatever_its_session_zone(self):
+        """`TODAY_IN_KYIV`, the day every shared Postgres body counts from,
+        asked under the two zones furthest from Kyiv (UTC-12 and UTC+14): at
+        any moment at least one of them is on another date than Kyiv."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        import asyncpg
+
+        kyiv = ZoneInfo(DISPLAY_TIMEZONE)
+        sessions_elsewhere = []
+        for zone in ("Etc/GMT+12", "Etc/GMT-14"):
+            conn = await asyncpg.connect(DSN, server_settings={"timezone": zone})
+            try:
+                before = datetime.now(kyiv).date()
+                today, session_day = await conn.fetchrow(
+                    f"SELECT {TODAY_IN_KYIV}, CURRENT_DATE")
+                after = datetime.now(kyiv).date()
+            finally:
+                await conn.close()
+            assert today in {before, after}, zone
+            if session_day != today:
+                sessions_elsewhere.append(zone)
+        # The guard on the guard: a day taken from the session would have
+        # differed in at least one of the two.
+        assert sessions_elsewhere
 
     def test_clickhouse_gets_the_only_form_it_parses(self):
         # Measured on 24.8.14.39, production's version: it rejects
