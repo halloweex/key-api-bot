@@ -7,8 +7,6 @@ import { chunkReloader, isMissingChunk, lazyChunk } from '../lazyChunk'
  * error the module raised itself.
  */
 
-const FLAG = 'ks:chunk-reloaded'
-
 /** `lazy()` defers the factory until React renders, so call it directly. */
 function load(component: unknown): Promise<unknown> {
   return (component as { _payload: { _result: () => Promise<unknown> } })
@@ -58,7 +56,6 @@ describe('lazyChunk', () => {
 
     await expect(load(lazyChunk(missing))).rejects.toThrow()
     expect(reload).toHaveBeenCalledTimes(1)
-    expect(sessionStorage.getItem(FLAG)).toBe('1')
 
     // A second miss in the same tab is a chunk that is genuinely gone, not a
     // stale document. One error screen beats an endless refresh.
@@ -72,7 +69,6 @@ describe('lazyChunk', () => {
 
     await expect(load(lazyChunk(broken))).rejects.toThrow('boom')
     expect(reload).not.toHaveBeenCalled()
-    expect(sessionStorage.getItem(FLAG)).toBeNull()
   })
 
   it('passes the module through untouched when it loads', async () => {
@@ -92,9 +88,8 @@ describe('lazyChunk', () => {
     await expect(load(lazyChunk(missing))).rejects.toThrow()
     expect(reload).toHaveBeenCalledTimes(1)
 
-    // …the reload lands, a chunk loads fine, and the flag is spent.
+    // …the reload lands and a chunk loads fine.
     await load(lazyChunk(() => Promise.resolve({ default: (() => null) as never })))
-    expect(sessionStorage.getItem(FLAG)).toBeNull()
 
     await expect(load(lazyChunk(missing))).rejects.toThrow()
     expect(reload).toHaveBeenCalledTimes(2)

@@ -8,17 +8,14 @@ import {
   BY_CHANNEL, BY_DEVICE, BY_TYPE, FUNNEL, NOW, PREVIOUS, STEADY, YEAR_AGO, c,
 } from '../../test/funnelFixtures'
 
-/** The plain two-proportion z, to hold `noiseZ` to. */
-function plainZ(k1: number, n1: number, k2: number, n2: number): number {
-  const p = (k1 + k2) / (n1 + n2)
-  return (k1 / n1 - k2 / n2) / Math.sqrt(p * (1 - p) * (1 / n1 + 1 / n2))
-}
-
 describe('telling a change from noise', () => {
   it('widens the binomial spread by the measured overdispersion', () => {
+    // The plain two-proportion z of these counts is -2.63, past the cut and
+    // "worse"; GA4's own scatter makes it -1.88, which is ordinary noise.
     const z = noiseZ(690, 34000, 700, 30000)
     expect(z).not.toBeNull()
-    expect(z!).toBeCloseTo(plainZ(690, 34000, 700, 30000) / Math.sqrt(OVERDISPERSION), 10)
+    expect(z!).toBeCloseTo(-1.88, 2)
+    expect(judge(z)).toBe('same')
   })
 
   it('calls a plain z of 2.5 ordinary noise, and 3 a change', () => {
@@ -66,9 +63,10 @@ describe('the steps', () => {
   })
 
   it('prices a step by the buyers it moved, the rest of the funnel held as it is now', () => {
-    // (1015/2420 − 1050/2200) × 2420 carts × 690/1015 who went on to buy.
-    expect(buyersMoved(NOW, PREVIOUS, 'began_checkout')).toBeCloseTo((1015 / 2420 - 1050 / 2200) * 2420 * (690 / 1015), 8)
-    expect(buyersMoved(NOW, PREVIOUS, 'purchased')).toBeCloseTo((690 / 1015 - 700 / 1050) * 1015, 8)
+    // Fewer of the carts reach checkout than before, so about 95 buyers fewer;
+    // the last step is priced by its own share alone.
+    expect(buyersMoved(NOW, PREVIOUS, 'began_checkout')).toBeCloseTo(-95.2, 1)
+    expect(buyersMoved(NOW, PREVIOUS, 'purchased')).toBeCloseTo(13.3, 1)
   })
 
   it('rounds the way a count is said', () => {

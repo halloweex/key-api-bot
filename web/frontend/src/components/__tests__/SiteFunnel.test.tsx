@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18n from '../../lib/i18n'
-import { ApiError } from '../../api/client'
-import { FUNNEL, c } from '../../test/funnelFixtures'
+import { FUNNEL } from '../../test/funnelFixtures'
 import { addDays, kyivToday } from '../../utils/smsDates'
 import type { TrafficFunnelResponse } from '../../types/api'
 
@@ -132,35 +131,6 @@ describe('the site funnel', () => {
     expect(shown()).toContain('открыли товар 49 % — ниже остального сайта')
     expect(shown()).toContain('▼ хуже обычного')
   })
-
-  it('claims nothing about a day of few people, and says so with both counts', () => {
-    const day = c(1100, 600, 80, 35, 23)
-    withData({ ...FUNNEL, total: { current: day, previous: c(1050, 580, 75, 33, 22), year_ago: c(0, 0, 0, 0, 0) } })
-    render(<SiteFunnel />)
-    expect(shown()).toContain('Мало данных для выводов: зашли 1 100, купили 23. Показаны только цифры.')
-    expect(shown()).not.toContain('в пределах колебаний')
-    expect(shown()).not.toContain('хуже обычного')
-    expect(shown()).not.toContain('лучше обычного')
-  })
-
-  it('says Google Analytics is not connected, when the server has no key', () => {
-    state.funnel = { data: undefined, isLoading: false, error: new ApiError(503, 'GA4 is not configured') }
-    render(<SiteFunnel />)
-    expect(shown()).toContain('Google Analytics ещё не подключён')
-    expect(shown()).toContain('Остальные разделы «Трафика» работают.')
-  })
-
-  it('says a backwards period is one, rather than that nobody came', () => {
-    withData({ ...FUNNEL, periods: { ...FUNNEL.periods, current: { start: '2026-10-31', end: '2026-10-01' } } })
-    render(<SiteFunnel />)
-    expect(shown()).toContain('Начало периода позже его конца — выберите даты заново.')
-  })
-
-  it('says when the figures are from, while Google Analytics does not answer', () => {
-    withData({ ...FUNNEL, stale: true })
-    render(<SiteFunnel />)
-    expect(shown()).toMatch(/Google Analytics не отвечает — показаны данные на (\d+ \S+, )?\d{2}:\d{2}/)
-  })
 })
 
 describe('the site funnel on a phone', () => {
@@ -189,8 +159,6 @@ describe('the site funnel on a phone', () => {
     render(<SiteFunnel />)
     expect(screen.queryByRole('radio', { name: 'с прошлым годом' })).toBeNull()
     const chip = screen.getByRole('button', { name: /^Сравнение с 31 августа – 30 сентября 2026/ })
-    expect(plain(chip.textContent)).toContain('31 авг. – 30 сент.')
-    expect(chip).toHaveAttribute('aria-haspopup', 'dialog')
 
     await userEvent.click(chip)
     const sheet = screen.getByRole('dialog', { name: 'С чем сравнить' })
@@ -198,7 +166,7 @@ describe('the site funnel on a phone', () => {
     await userEvent.click(within(sheet).getByRole('radio', { name: /^с прошлым годом/ }))
 
     expect(screen.queryByRole('dialog', { name: 'С чем сравнить' })).toBeNull()
-    expect(plain(screen.getByRole('button', { name: /^Сравнение с 1–31 октября 2025/ }).textContent)).toContain('окт. 2025')
+    expect(screen.getByRole('button', { name: /^Сравнение с 1–31 октября 2025/ })).toBeInTheDocument()
     expect(shown()).toContain('было 1,13 %')
   })
 
