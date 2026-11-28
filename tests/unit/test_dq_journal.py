@@ -1,9 +1,11 @@
 """Chain 9: the quality journal, written to and read from Postgres alone.
 
-The parts that need no database. What needs a real Postgres — the allocator
-under two concurrent runs, every column as written, the Postgres readers
-rendering what DuckDB's rendered (literals taken from DuckDB's answer on the
-base, step 14's rule 9) — is in `tests/integration/test_dq_journal_pg.py`.
+The parts that need no database, and one that does: the digest's baseline
+read through the door from the beat it stored. What else needs a real
+Postgres — the allocator under two concurrent runs, every column as written,
+the Postgres readers rendering what DuckDB's rendered (literals taken from
+DuckDB's answer on the base, step 14's rule 9) — is in
+`tests/integration/test_dq_journal_pg.py`.
 
 Until step 14's S14-10 the journal had a DuckDB shadow and a `duckdb` branch
 behind `KS_WRITE_DQ_JOURNAL`; their tests went with them. What is held here
@@ -28,6 +30,8 @@ from core.data_quality import (
     Discrepancy, DiscrepancyClass, IntegrityIssue, Severity, journal_rows,
     run_values,
 )
+from tests.helpers.dq_journal_pg import pool  # noqa: F401 — the journal, emptied
+from tests.integration.pg_tab_seed import needs_postgres
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 1, 7, 30, tzinfo=timezone.utc)
@@ -206,7 +210,6 @@ def pg_journal(monkeypatch):
         return dict(PG_RUN, layer=layer or "integrity", run_id=900)
 
     async def baseline_run(conn, layer, *, sent_at, before_run_id):
-        state["sent_at"] = sent_at
         return dict(PG_RUN, run_id=899)
 
     async def run_issues(conn, run_id, limit=100):
@@ -235,15 +238,44 @@ def pg_journal(monkeypatch):
 
 
 class TestReadersReadPostgres:
+    # The integrity layer's real slots, 01/07/13/19 Kyiv, in UTC; the digest
+    # went out at 09:00 Kyiv on the 14th, between the second and the third.
+    SLOTS_UTC = [datetime(2026, 9, 13, 22, tzinfo=timezone.utc),
+                 datetime(2026, 9, 14, 4, tzinfo=timezone.utc),
+                 datetime(2026, 9, 14, 10, tzinfo=timezone.utc),
+                 datetime(2026, 9, 14, 16, tzinfo=timezone.utc),
+                 datetime(2026, 9, 14, 22, tzinfo=timezone.utc),
+                 datetime(2026, 9, 15, 4, tzinfo=timezone.utc)]
+    SENT_AT = datetime(2026, 9, 14, 6, tzinfo=timezone.utc)
+
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_digest_reads_postgres(self, flag, no_duckdb, pg_journal):
-        """Mutation: read the digest's journal anywhere else."""
-        last, sections = await dq_journal.digest_inputs(("integrity",), NOW)
-        assert last == datetime.fromisoformat(pg_journal["marker"])
-        assert sections[0].run["run_id"] == 900
-        assert [i["check_name"] for i in sections[0].issues] == ["from_postgres"]
-        assert pg_journal["sent_at"] == last
-        assert pg_journal["copy_asked"] == []       # the beat was there
+    async def test_the_digest_compares_with_what_the_last_digest_read(self, pool):
+        """The 2026-09-14 incident: 809 at 01:00 and 07:00 Kyiv, the digest at
+        09:00, then 812 from 13:00 on. The next digest must set 812 against
+        the 809 its reader last saw — not against the 812 of the run six
+        hours before, which printed "=" for a finding that had moved. The
+        runs and the beat are written through the journal's door, the beat
+        between them as the job writes it, and read back from Postgres.
+        Mutation: hand the baseline anything but the stored beat."""
+        for i, count in enumerate((809, 809, 812, 812, 812, 812)):
+            started = self.SLOTS_UTC[i]
+            await dq_journal.journal_run(**_kwargs(
+                started_at=started, ended_at=started + timedelta(seconds=3),
+                as_of=started, window_start=started.date(), window_end=started.date(),
+                issues=[_issue("goods_shipped_without_sale", Severity.INFO, count)],
+                discrepancies=[]))
+            if i == 1:          # the 07:00 run; the digest goes out at 09:00
+                await dq_journal.mark_digest_sent(self.SENT_AT.isoformat())
+
+        last, (section,) = await dq_journal.digest_inputs(
+            ("integrity",), self.SLOTS_UTC[-1] + timedelta(hours=2))
+
+        assert last == self.SENT_AT
+        assert [(i["check_name"], i["count"]) for i in section.issues] == [
+            ("goods_shipped_without_sale", 812)]
+        assert [(i["check_name"], i["count"]) for i in section.previous_issues] == [
+            ("goods_shipped_without_sale", 809)]
 
     @pytest.mark.asyncio
     async def test_the_data_quality_endpoint_reads_postgres(self, flag, no_duckdb,

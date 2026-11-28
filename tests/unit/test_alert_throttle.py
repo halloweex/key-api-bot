@@ -8,10 +8,21 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from core import telegram_alerts
 from core.telegram_alerts import AlertThrottle, reset_throttle, throttle_check
 from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 
 bot_main = __import__("importlib").import_module("bot.main")
+
+# The three HTTP transports, bound at import, before conftest's autouse guard
+# replaces each with a stub that returns 0: the kill switch lives inside them,
+# so its test has to call the real ones.
+_REAL_HTTP_SENDERS = (telegram_alerts.send_admin_message_http,
+                      telegram_alerts.send_admin_photo_http,
+                      telegram_alerts.send_rich_message_http)
+if any(f.__module__ != "core.telegram_alerts" for f in _REAL_HTTP_SENDERS):  # pragma: no cover
+    raise RuntimeError("test_alert_throttle bound a stubbed transport; it must be "
+                       "imported at collection, before any test runs")
 
 
 class TestAlertThrottle:
@@ -183,19 +194,28 @@ class TestTheDevKillSwitch:
 
     @pytest.mark.asyncio
     async def test_http_senders_never_touch_the_network(self, monkeypatch):
-        import httpx
+        """The real message, photo and rich-message transports, with Telegram
+        faked at the transport: switched off, each answers 0 and not one
+        request leaves; switched back on, each one's request does — so the
+        silence is the switch's and not the fake's. Mutation: drop the switch
+        from any of the three."""
+        message, photo, rich = _REAL_HTTP_SENDERS
+        telegram = telegram_at_the_transport(monkeypatch)
 
-        from core import telegram_alerts
+        async def send_all():
+            return [await message("боль", token="t", chat_ids=ADMINS),
+                    await photo(b"png", "отчёт", token="t", chat_ids=ADMINS),
+                    await rich("<p>отчёт</p>", token="t", chat_ids=ADMINS)]
 
         monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "1")
+        assert await send_all() == [0, 0, 0]
+        assert telegram.calls == []
 
-        def forbidden(*a, **kw):
-            raise AssertionError("suppressed alert opened an HTTP client")
-
-        monkeypatch.setattr(httpx, "AsyncClient", forbidden)
-
-        assert await telegram_alerts.send_admin_message_http("боль") == 0
-        assert await telegram_alerts.send_admin_photo_http(b"png", "отчёт") == 0
+        monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "0")
+        delivered = await send_all()
+        assert delivered[0] == len(ADMINS)
+        assert {method for method, _, _ in telegram.calls} == {
+            "sendMessage", "sendPhoto", "sendRichMessage"}
 
     @pytest.mark.asyncio
     async def test_a_suppressed_alert_leaves_its_throttle_slot(self, monkeypatch):

@@ -12,6 +12,8 @@ SQL — that a system with no moved chain asks Postgres nothing at all, that
 every threshold sits where the module says it does rather than one row either
 side of it, and that the integrity job judges these beside the Postgres twins,
 so a DuckDB half that raises loses none of them and holds back no page.
+Chain 3's expense orphans are the exception, read over the test Postgres
+here (`TestChain3Orders`), the handover dated by the chain's owner row.
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_chain_invariants as inv
+from tests.integration.pg_tab_seed import DSN, needs_postgres, seed, tab_in_postgres
 
 UTC_NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
 
@@ -524,31 +527,64 @@ class TestChain3Orders:
     backfill-miss ledger (Postgres has no default there, and the half-written
     repair's 30-day `NOT EXISTS` cannot compare a NULL)."""
 
-    @pytest.fixture
-    def flagged(self, monkeypatch):
-        _watch_only(monkeypatch, "pg_orders_write")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.watched == ("pg_orders_write",) and facts.whole is None
-        assert isinstance(facts.orders, inv.Orders) and facts.orders.latched_at is None
-        read = "\n".join(conn.sql)
-        assert "app.order_backfill_misses" in read
-        assert "AS orphans" not in read
-        assert inv.check_chain_invariants(facts) == []
+    async def test_an_orphaned_expense_is_judged_from_the_handover_on(self, monkeypatch):
+        """Chain 3's tables on the test Postgres: an expense whose order is
+        held, one whose order is not and that landed two days ago, and one
+        that landed an hour ago and whose order is not held yet. Before the
+        chain's first write — no owner row — none is judged: the per-tick
+        mirrors landed an expense and its order in different transactions
+        then. From the handover on, the old orphan alone is a WARN, by its id;
+        the hour-old one is still in flight. Mutation: read the orphans before
+        the handover, or judge them at 0 days."""
+        from core import pg_orders_write
+        from core.data_quality import Severity
 
-    @pytest.mark.asyncio
-    async def test_after_the_first_write_it_reads_them_with_the_stamp(self, flagged):
-        _latch("pg_orders_write")
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.orders.latched_at == UTC_NOW
-        assert "AS orphans" in "\n".join(conn.sql)
+        now = datetime.now(timezone.utc)
+
+        async def populate(conn, _pool):
+            await seed(conn, orders=[(101, 1, 1, 100.0, now - timedelta(days=3),
+                                      None, None, None)])
+            await conn.executemany(
+                "INSERT INTO bronze.expenses (id, order_id, amount, mirrored_at)"
+                " VALUES ($1, $2, $3, $4)",
+                [(11, 101, 10.0, now - timedelta(days=2)),     # its order is held
+                 (12, 990, 20.0, now - timedelta(days=2)),     # an orphan
+                 (13, 991, 30.0, now - timedelta(hours=1))])   # still in flight
+
+        async def orphans(pool):
+            facts = await inv.read_facts(pool=pool)
+            return [(i.severity, i.count, tuple(i.sample_ids), i.table_name)
+                    for i in inv.check_chain_invariants(facts)
+                    if i.check_name == inv.EXPENSE_ORPHANS]
+
+        owner_keys = [chain_latch.OWNER_PREFIX + t for t in pg_orders_write.CHAIN_TABLES]
+        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+            async with pool.acquire() as conn:
+                held = await conn.fetch(
+                    "SELECT key, value, updated_at FROM meta.chain_watermarks"
+                    " WHERE key = ANY($1)", owner_keys)
+                await conn.execute(
+                    "DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", owner_keys)
+            try:
+                before = await orphans(pool)
+                async with pool.acquire() as conn:     # the chain's first write
+                    await conn.execute(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, now())", chain_latch.OWNER_PREFIX + "bronze.orders",
+                        (now - timedelta(days=3)).isoformat())
+                after = await orphans(pool)
+            finally:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", owner_keys)
+                    await conn.executemany(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, $3)", [tuple(r) for r in held])
+
+        assert before == []
+        assert after == [(Severity.WARN, 1, (12,), "bronze.expenses")]
 
     @staticmethod
     def _facts(latched_at=None, null_checked=0, **kw):
@@ -576,11 +612,6 @@ class TestChain3Orders:
         assert issue.check_name == inv.COLUMN_NULL
         assert issue.severity is Severity.CRITICAL and issue.count == 3
         assert issue.table_name == "app.order_backfill_misses"
-
-    def test_the_orphan_window_is_a_day(self):
-        """Mutation: judge at 0 days — an order refused this tick and
-        re-offered by the next is not a defect yet."""
-        assert "interval '1 day'" in inv._EXPENSE_ORPHANS_SQL
 
     def test_an_unreadable_orders_group_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_orders_write",), now=UTC_NOW,

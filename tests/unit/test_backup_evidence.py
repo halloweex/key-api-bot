@@ -6,6 +6,7 @@ Each test names the mutation it exists to fail on.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -61,58 +62,54 @@ def test_the_published_block_carries_ages_only(tmp_path):
 
 # ─── /api/health publishes it ─────────────────────────────────────────────────
 
-def test_the_health_block_reads_the_data_directory(tmp_path, monkeypatch):
-    """The route reads the same markers the precondition does, from `./data`.
-    Mutation: return a constant, or read another directory."""
-    from web.routes.api import health
+def _health():
+    """`GET /api/health` through the app, as the canary and Docker ask it."""
+    from fastapi.testclient import TestClient
 
+    from core import store as core_store
+    from web.main import app
+    from web.ratelimit import limiter
+
+    limiter.reset()
+    try:
+        return TestClient(app).get("/api/health")
+    finally:
+        limiter.reset()
+        asyncio.run(core_store.close_store())
+
+
+def test_the_health_endpoint_publishes_the_ages_from_the_data_directory(
+        tmp_path, monkeypatch):
+    """The endpoint answers the ages of the markers in `./data`, the block the
+    canary judges: the shipment three hours old, neither drill ever passed.
+    Mutation: return a constant, read another directory, or drop the block
+    from the route or from its response model (which drops any field it does
+    not declare)."""
     _write(tmp_path, ev.OFFSITE, datetime.now(timezone.utc) - timedelta(hours=3))
     monkeypatch.setattr(ev, "DATA_DIR", tmp_path)
-    block = health._backups()
+
+    response = _health()
+
+    assert response.status_code == 200
+    block = response.json()["backups"]
     assert set(block) == {"pitr_drill_age_h", "remote_restore_age_h", "pg_offsite_age_h"}
     assert block["pitr_drill_age_h"] is None and block["remote_restore_age_h"] is None
     assert block["pg_offsite_age_h"] == pytest.approx(3, abs=0.2)
 
 
-def test_an_unreadable_block_is_null_not_a_raise(monkeypatch):
+def test_an_unreadable_block_is_null_and_the_endpoint_still_answers(monkeypatch):
     """`/api/health` must answer whatever the disk says. Mutation: drop the
     guard — the whole health check would 500 over one block."""
-    from web.routes.api import health
-
     def boom(*a, **k):
         raise OSError("disk")
 
     monkeypatch.setattr(ev, "published", boom)
-    assert health._backups() is None
 
+    response = _health()
 
-def test_the_response_model_keeps_it():
-    """`/api/health` has a response model, and a field it does not declare is
-    dropped on the way out. Mutation: drop the field from `HealthResponse`."""
-    from web.schemas import HealthResponse
-
-    assert "backups" in HealthResponse.model_fields
-
-
-def test_the_route_returns_it():
-    """Read off the route's own return statement, not its prose: the dict
-    `health_check` returns names `backups` and fills it from `_backups()`.
-    Mutation: drop the key from the returned dict."""
-    import ast
-    import inspect
-
-    from web.routes.api import health
-
-    tree = ast.parse(inspect.getsource(health))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check")
-    returned = [n.value for n in ast.walk(fn)
-                if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
-    assert returned, "health_check returns no dict literal"
-    pairs = {k.value: v for d in returned for k, v in zip(d.keys, d.values)
-             if isinstance(k, ast.Constant)}
-    value = pairs.get("backups")
-    assert isinstance(value, ast.Call) and getattr(value.func, "id", None) == "_backups"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["backups"] is None and body["status"] == "healthy"
 
 
 # ─── The canary judges it (step 14's S14-00) ─────────────────────────────────
