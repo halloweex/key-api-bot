@@ -31,7 +31,7 @@ export interface ForestRow {
 }
 
 /** A domain that always contains zero, padded so ends are not flush. */
-function domainOf(rows: ForestRow[]): [number, number] {
+export function domainOf(rows: ForestRow[]): [number, number] {
   let lo = 0
   let hi = 0
   for (const r of rows) {
@@ -43,7 +43,7 @@ function domainOf(rows: ForestRow[]): [number, number] {
 }
 
 /** Round tick steps: 1, 2, 5 × a power of ten. */
-function ticksFor([lo, hi]: [number, number]): number[] {
+export function ticksFor([lo, hi]: [number, number]): number[] {
   const raw = (hi - lo) / 4
   const mag = 10 ** Math.floor(Math.log10(raw))
   const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw) ?? mag * 10
