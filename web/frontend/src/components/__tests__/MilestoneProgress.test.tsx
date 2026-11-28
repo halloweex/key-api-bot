@@ -9,11 +9,12 @@ vi.unmock('react-i18next')
 
 const state = vi.hoisted(() => ({
   goals: { data: undefined as unknown, isLoading: false },
+  trend: undefined as unknown,
 }))
 
 vi.mock('../../hooks', () => ({
   useSmartGoals: () => state.goals,
-  useRevenueTrend: () => ({ data: undefined }),
+  useRevenueTrend: () => ({ data: state.trend }),
 }))
 
 import { MilestoneProgress } from '../MilestoneProgress'
@@ -67,8 +68,44 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   vi.unstubAllGlobals()
+  state.trend = undefined
   useFilterStore.setState({ period: 'month' as never })
   await i18n.changeLanguage('en')
+})
+
+// 28 days ending on `last` ("dd.mm" of this year), 100 a day, 0 on the days given.
+function window28(last: string, zero: string[] = []) {
+  const [day, month] = last.split('.').map(Number)
+  const end = new Date(2026, month - 1, day)
+  const labels: string[] = []
+  for (let i = 27; i >= 0; i--) {
+    const d = new Date(end)
+    d.setDate(end.getDate() - i)
+    labels.push(`${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+  const revenue: number[] = labels.map((label) => (zero.includes(label) ? 0 : 100))
+  return { labels, revenue, total: revenue.reduce((a, b) => a + b, 0) }
+}
+
+const shownRevenue = (container: HTMLElement) =>
+  plain(container.querySelector('span.text-base.font-bold')?.textContent)
+
+describe('the last 28 days set the current month against the month goal', () => {
+  const MONTH_GOAL = goals('yoy_growth', { daily: 160_000, weekly: 1_100_000, monthly: 4_700_000 })
+
+  it('counts only the days of the month the window ends in', () => {
+    const w = window28('26.11')          // 30.10 … 26.11: two October days
+    state.trend = { labels: w.labels, revenue: w.revenue }
+    const { container } = show(MONTH_GOAL, 'last_28_days', w.total)
+    expect(shownRevenue(container)).toBe('₴2 600')
+  })
+
+  it('says nothing yet on the first of the month, not the whole 28 days', () => {
+    const w = window28('01.12', ['01.12'])   // 04.11 … 01.12, nothing sold on the 1st
+    state.trend = { labels: w.labels, revenue: w.revenue }
+    const { container } = show(MONTH_GOAL, 'last_28_days', w.total)
+    expect(shownRevenue(container)).toBe('₴0')
+  })
 })
 
 describe('a sales type with no history of its own', () => {

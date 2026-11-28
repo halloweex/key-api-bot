@@ -5,6 +5,7 @@ import { InfoPopover } from './InfoPopover'
 import { MetricCard } from './MetricCard'
 import { useInventoryAnalysis, useStockActions } from '../hooks'
 import { formatNumber, formatCurrency } from '../utils/formatters'
+import { categoryLabel } from '../utils/categoryLabel'
 import type {
   InventoryAnalysisItem,
   QuadrantMatrix,
@@ -520,7 +521,7 @@ function ItemsTab({ items }: ItemsTabProps) {
               <div className="text-[11px] text-slate-500 flex flex-wrap gap-x-1.5">
                 {item.brand && <span className="font-medium">{item.brand}</span>}
                 {item.brand && <span>·</span>}
-                <span>{item.categoryName || t('inventory.uncategorized')}</span>
+                <span>{categoryLabel(item.categoryName, t)}</span>
                 <span>·</span>
                 <span className="font-mono">{item.abcClass}</span>
                 <span>·</span>

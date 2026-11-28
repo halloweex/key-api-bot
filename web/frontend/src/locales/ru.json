@@ -427,7 +427,7 @@
   "inventory.turnover.topExcess": "Крупнейшие ловушки капитала",
   "inventory.turnover.turnoverRatio": "Оборачиваемость",
   "inventory.turnover.zeroVelocity": "Без продаж",
-  "inventory.uncategorized": "Без категории",
+  "category.none": "Без категории",
   "margin.alerts": "Оповещения о низкой марже",
   "margin.alertsDesc": "Бренды с маржой ниже порога",
   "margin.brand": "Бренд",

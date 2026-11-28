@@ -92,6 +92,7 @@ const CATEGORY_NAME_STYLE: CSSProperties = {
 import { useProductPerformance, useCategoryBreakdown } from '../hooks'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import { CATEGORY_COLORS } from '../utils/colors'
+import { categoryLabel, isNoCategory } from '../utils/categoryLabel'
 import { Button } from './Button'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -99,6 +100,9 @@ import { Button } from './Button'
 interface ChartDataPoint {
   name: string
   fullName: string
+  /** The API's name for the bar, which the drill-down asks for; `name` and
+   * `fullName` are what the screen says (`categoryLabel`). */
+  key: string
   value: number
   color: string
   percent: number
@@ -194,19 +198,21 @@ export const CategoryChart = memo(function CategoryChart() {
   const error = performanceError
 
   const { chartData, totalRevenue } = useMemo(() => {
-    let items: { name: string; value: number }[] = []
+    let items: { key: string; name: string; value: number }[] = []
 
     // Drilled-down view (subcategories)
     if (selectedCategory && breakdownData?.labels?.length) {
       items = breakdownData.labels.map((label: string, index: number) => ({
-        name: label || 'Unknown',
+        key: label,
+        name: categoryLabel(label, t),
         value: breakdownData.revenue?.[index] ?? 0,
       }))
     }
     // Top-level view (parent categories)
     else if (performanceData?.categoryBreakdown?.labels?.length) {
       items = performanceData.categoryBreakdown.labels.map((label, index) => ({
-        name: label || 'Unknown',
+        key: label,
+        name: categoryLabel(label, t),
         value: performanceData.categoryBreakdown.revenue?.[index] ?? 0,
       }))
     }
@@ -223,6 +229,7 @@ export const CategoryChart = memo(function CategoryChart() {
       return {
         name: truncateText(item.name, 18),
         fullName: item.name,
+        key: item.key,
         value: item.value,
         color: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
         percent,
@@ -231,11 +238,13 @@ export const CategoryChart = memo(function CategoryChart() {
     })
 
     return { chartData: processed, totalRevenue: total }
-  }, [performanceData, breakdownData, selectedCategory])
+  }, [performanceData, breakdownData, selectedCategory, t])
 
+  // The drill-down asks the API by its own name for the bar; the bucket of
+  // goods with no category has no subcategories to open.
   const handleBarClick = useCallback((data: ChartDataPoint) => {
-    if (!selectedCategory) {
-      setSelectedCategory(data.fullName)
+    if (!selectedCategory && !isNoCategory(data.key)) {
+      setSelectedCategory(data.key)
     }
   }, [selectedCategory])
 

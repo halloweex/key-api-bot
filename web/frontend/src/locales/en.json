@@ -427,7 +427,7 @@
   "inventory.turnover.topExcess": "Top Capital Traps",
   "inventory.turnover.turnoverRatio": "Turnover Ratio",
   "inventory.turnover.zeroVelocity": "Zero Velocity",
-  "inventory.uncategorized": "Uncategorized",
+  "category.none": "Uncategorized",
   "margin.alerts": "Low-Margin Alerts",
   "margin.alertsDesc": "Brands with margin below threshold",
   "margin.brand": "Brand",

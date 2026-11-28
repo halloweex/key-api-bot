@@ -5,6 +5,7 @@ import { ChartContainer } from './ChartContainer'
 import { Badge } from './Badge'
 import { useMarginBrandCategory } from '../hooks'
 import { formatCurrency, formatPercent } from '../utils/formatters'
+import { categoryLabel } from '../utils/categoryLabel'
 import type { MarginBrandCategoryItem } from '../types/api'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ export const MarginBrandCategoryTable = memo(function MarginBrandCategoryTable()
                   {item.brand}
                 </td>
                 <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">
-                  {item.category}
+                  {categoryLabel(item.category, t)}
                 </td>
                 <td className="py-1.5 px-3 text-right text-slate-700">
                   {formatCurrency(item.total_revenue)}

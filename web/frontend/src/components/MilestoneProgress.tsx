@@ -672,23 +672,27 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       return revenue
     }
 
-    // Get current month (1-indexed to match date format "dd.mm")
-    const currentMonth = new Date().getMonth() + 1
+    // The window ends today, so its last day names the current month
+    // ("dd.mm", 1-indexed) — read off the series rather than the browser's
+    // clock, which abroad sits in another month for hours at either end.
+    const lastLabel = trendData.labels[trendData.labels.length - 1]
+    const currentMonth = parseInt(lastLabel.split('.')[1] ?? '', 10)
+    if (Number.isNaN(currentMonth)) return revenue
 
     // Sum revenue only for current month days
     let monthRevenue = 0
     trendData.labels.forEach((label: string, index: number) => {
       // Parse month from "dd.mm" format (e.g., "21.01" for January 21st)
       const parts = label.split('.')
-      if (parts.length >= 2) {
-        const labelMonth = parseInt(parts[1], 10)
-        if (labelMonth === currentMonth) {
-          monthRevenue += trendData.revenue?.[index] ?? 0
-        }
+      if (parts.length >= 2 && parseInt(parts[1], 10) === currentMonth) {
+        monthRevenue += trendData.revenue?.[index] ?? 0
       }
     })
 
-    return monthRevenue > 0 ? monthRevenue : revenue
+    // Zero is an answer: on the month's first day, before its first order,
+    // the month has made nothing yet. Falling back to `revenue` here set all
+    // 28 days against the month's goal (found 2026-11-27).
+    return monthRevenue
   }, [period, trendData, revenue])
 
   // Calculate the excluded previous month revenue for display
