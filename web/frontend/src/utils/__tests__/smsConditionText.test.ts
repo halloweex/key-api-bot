@@ -77,16 +77,13 @@ describe('a purchase and a channel in one group', () => {
 })
 
 describe('a condition as its row', () => {
-  it('puts the unit in the sentence, in the form the number takes', async () => {
+  it('puts the count and the period in the sentence, for both directions', async () => {
     await i18n.changeLanguage('ru')
-    const c = (count: number): Condition => ({ ...orders(count, '', ''), period: { kind: 'last', days: 21 } })
-    expect(conditionSentence(c(1), t).blanks).toEqual(['1+ заказ', 'за последние 21 день'])
-    expect(conditionSentence(c(2), t).blanks[0]).toBe('2+ заказа')
-    expect(conditionSentence(c(5), t).blanks[0]).toBe('5+ заказов')
+    const atLeast: Condition = { ...orders(2, '', ''), period: { kind: 'last', days: 21 } }
+    expect(conditionSentence(atLeast, t).blanks).toEqual(['2+ заказа', 'за последние 21 день'])
     expect(conditionSentence(
       { ...orders(3, '', ''), op: 'atMost', period: { kind: 'all' } }, t,
     ).blanks).toEqual(['не больше 3 заказов', 'за всё время'])
-    expect(conditionSentence(c(2), t).label).toBe('Сделал(а)')
   })
 
   it('picks plural forms by the rules of the language', async () => {

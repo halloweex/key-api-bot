@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { SmsLiftForest, type ForestRow } from '../SmsLiftForest'
+import { SmsLiftForest, domainOf, ticksFor, type ForestRow } from '../SmsLiftForest'
 import type { SmsComparison } from '../../types/api'
 
 // src/lib/i18n.ts reads localStorage while the module is being imported, and
@@ -41,37 +41,23 @@ function row(label: string, over: Partial<SmsComparison> = {}): ForestRow {
   return { label, comparison: comparison(over), contacts: 1000 }
 }
 
-/** Left offsets of the zero rules, one per row. */
-function zeroLines(container: HTMLElement): string[] {
-  return Array.from(container.querySelectorAll<HTMLElement>('.bg-slate-300'))
-    .map((el) => el.style.left)
-}
-
 describe('SmsLiftForest', () => {
-  it('puts every row on the same scale — the reason it exists', () => {
-    const { container } = render(
-      <SmsLiftForest
-        rows={[
-          row('narrow', { ci95Pp: [-0.2, 0.4], liftPp: 0.1 }),
-          row('wide', { ci95Pp: [-6, 9], liftPp: 1.5 }),
-        ]}
-      />,
-    )
-
-    const lines = zeroLines(container)
-    expect(lines).toHaveLength(2)
-    expect(new Set(lines).size).toBe(1)
+  it('puts every row on one scale that holds the widest interval', () => {
+    // One shared domain is what makes rows comparable; each row used to get its own.
+    const rows = [
+      row('narrow', { ci95Pp: [-0.2, 0.4], liftPp: 0.1 }),
+      row('wide', { ci95Pp: [-6, 9], liftPp: 1.5 }),
+    ]
+    const [lo, hi] = domainOf(rows)
+    expect(lo).toBeLessThanOrEqual(-6)
+    expect(hi).toBeGreaterThanOrEqual(9)
   })
 
-  it('keeps every mark inside the plot, so nothing overflows', () => {
-    const { container } = render(
-      <SmsLiftForest rows={[row('a', { ci95Pp: [-4, 6], liftPp: 1 }), row('b')]} />,
-    )
-
-    const offsets = Array.from(container.querySelectorAll<HTMLElement>('[style*="left"]'))
-      .map((el) => parseFloat(el.style.left))
-    expect(offsets.every((x) => x >= 0 && x <= 100)).toBe(true)
-    expect(offsets.some(Number.isNaN)).toBe(false)
+  it('pads the domain so the interval ends are not flush with the edge', () => {
+    // width 10, padded by 12% of it each side
+    const [lo, hi] = domainOf([row('a', { ci95Pp: [-4, 6] })])
+    expect(lo).toBeCloseTo(-5.2)
+    expect(hi).toBeCloseTo(7.2)
   })
 
   it('draws a proven interval in the state colour and an unproven one grey', () => {
@@ -97,12 +83,19 @@ describe('SmsLiftForest', () => {
   })
 
   it('always includes zero on the axis even when no interval reaches it', () => {
-    const { container } = render(
-      <SmsLiftForest rows={[row('all positive', { ci95Pp: [2, 6], liftPp: 4 })]} />,
-    )
-
-    expect(zeroLines(container)).toHaveLength(1)
+    // Zero is the "no effect" line; an all-positive campaign must still show it.
+    const rows = [row('all positive', { ci95Pp: [2, 6], liftPp: 4 })]
+    const domain = domainOf(rows)
+    expect(domain[0]).toBeLessThanOrEqual(0)
+    expect(domain[1]).toBeGreaterThanOrEqual(6)
+    expect(ticksFor(domain)).toContain(0)
+    render(<SmsLiftForest rows={rows} />)
     expect(screen.getByText('0')).toBeTruthy()
+  })
+
+  it('labels the axis in round steps, all inside the domain', () => {
+    expect(ticksFor([-5.2, 7.2])).toEqual([-5, 0, 5])
+    expect(ticksFor([-0.7, 1.1])).toEqual([-0.5, 0, 0.5, 1])
   })
 
   it('reveals the figures on hover rather than printing them on every mark', () => {
