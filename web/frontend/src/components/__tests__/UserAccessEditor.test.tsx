@@ -33,9 +33,8 @@ describe('UserAccessEditor with no override', () => {
     )
     const traffic = screen.getByRole('button', { name: 'access.tab.traffic' })
     const margin = screen.getByRole('button', { name: 'access.tab.margin' })
-    // The lit ones carry the active background; the rest do not.
-    expect(traffic.className).not.toContain('bg-slate-100')
-    expect(margin.className).toContain('bg-slate-100')
+    expect(traffic).toHaveAttribute('aria-pressed', 'true')
+    expect(margin).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('starts the first click from what the person already has', () => {
@@ -51,12 +50,9 @@ describe('UserAccessEditor with no override', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'access.tab.margin' }))
-    expect(onChange).toHaveBeenCalledWith([...ROLE_TABS, 'margin'].sort(
-      (a, b) => ['dashboard', 'products', 'traffic', 'inventory', 'reports',
-                 'marketing', 'margin', 'expenses', 'sms'].indexOf(a)
-              - ['dashboard', 'products', 'traffic', 'inventory', 'reports',
-                 'marketing', 'margin', 'expenses', 'sms'].indexOf(b),
-    ))
+    expect(onChange).toHaveBeenCalledWith([
+      'dashboard', 'products', 'traffic', 'inventory', 'reports', 'marketing', 'margin',
+    ])
   })
 
   it('removing an inherited tab writes the rest explicitly', () => {
