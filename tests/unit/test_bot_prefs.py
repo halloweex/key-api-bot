@@ -10,8 +10,6 @@ the default, and a report that still goes out.
 """
 from __future__ import annotations
 
-import pathlib
-
 import pytest
 
 from core.bot_prefs import (
@@ -23,6 +21,8 @@ from core.bot_prefs import (
     write_language,
 )
 from core.i18n import DEFAULT_LANGUAGE, EN, RU, UK
+from tests.helpers.access_lists import bot_store_on_postgres
+from tests.integration.pg_tab_seed import needs_postgres
 
 ADMIN = 999
 
@@ -204,27 +204,41 @@ class TestOneHomeForTheChoice:
             write_language(1, "uk")
 
 
+@needs_postgres
 class TestTheReadersAskTheStoreTheBotWrites:
-    """Structural, because the defect was structural: the readers opened a
-    file, every functional test of them seeded that file, and all of them
-    passed while production read a copy frozen on 2026-08-27."""
+    """The defect: the readers opened the bot's SQLite file, every functional
+    test of them seeded that file, and all of them passed while production
+    read a copy frozen on 2026-08-27. Here the bot's store is Postgres, as
+    production runs it, and the SQLite file where the adapter would look
+    holds the frozen day's contrary answers, so a reader that opened it says
+    them. (The dashboard's door to the same row is held over Postgres in
+    `tests/integration/test_auth_identity.py::TestMeTouchesOnlyTheSessionsOwnRow`.)"""
 
-    SOURCE = pathlib.Path(__file__).resolve().parents[2] / "core" / "bot_prefs.py"
+    REVOKED, APPROVED, MUTED = 7_100_000_001, 7_100_000_002, 7_100_000_003
 
-    def test_bot_prefs_does_not_open_sqlite(self):
-        source = self.SOURCE.read_text()
-        assert "import sqlite3" not in source
-        assert "sqlite3.connect" not in source
-        assert "get_bot_store" in source
+    @pytest.mark.asyncio
+    async def test_the_weekly_reports_questions_follow_the_live_store(
+            self, monkeypatch, tmp_path):
+        from bot.store_sqlite import SqliteBotStore
 
-    def test_me_endpoint_does_not_reach_for_duckdb(self):
-        source = (
-            self.SOURCE.parent.parent / "web" / "routes" / "api" / "me.py"
-        ).read_text()
+        async with bot_store_on_postgres(monkeypatch, tmp_path) as live:
+            frozen = SqliteBotStore()
+            frozen.initialise()
+            for uid in (self.REVOKED, self.MUTED):
+                frozen.access.request(uid, f"user{uid}", "First", "Last")
+                frozen.access.approve(uid, ADMIN)
+            frozen.preferences.set(self.REVOKED, "language", "en")
+            frozen.preferences.set(self.MUTED, "notifications_enabled", 1)
 
-        assert "FROM user_preferences" not in source, (
-            "the endpoint is querying a preferences table directly again"
-        )
-        assert "INSERT INTO user_preferences" not in source
-        assert "get_store" not in source, "preferences do not live in DuckDB"
-        assert "write_language" in source and "read_language" in source
+            # Since the freeze, through the port, as the bot writes.
+            for uid in (self.REVOKED, self.APPROVED, self.MUTED):
+                live.access.request(uid, f"user{uid}", "First", "Last")
+                live.access.approve(uid, ADMIN)
+            live.access.deny(self.REVOKED, ADMIN)
+            live.preferences.set(self.REVOKED, "language", "ru")
+            live.preferences.set(self.APPROVED, "language", "en")
+            live.preferences.set(self.MUTED, "notifications_enabled", 0)
+
+            assert read_approved_user_ids() == [self.APPROVED]
+            assert read_user_languages([self.REVOKED, self.APPROVED]) == {
+                self.REVOKED: RU, self.APPROVED: EN}

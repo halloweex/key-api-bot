@@ -285,35 +285,59 @@ class TestEmitterWiring:
                 f"a step up announced something resolved: {after!r}"
             )
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_failed_dq_run_resolves_nothing(self):
+    async def test_a_failed_dq_run_resolves_nothing(self, monkeypatch):
         """A run that produced no verdict proves nothing: the condition is
-        unknown, not cleared."""
-        from core.scheduler import BackgroundScheduler
+        unknown, not cleared. The Postgres arm pages a status drift, and the
+        next arm fails before it compares anything: no notice goes out, the
+        series stays firing and the page stays heard. Mutation: resolve the
+        layer on a run that carries an error."""
+        install_journal(monkeypatch)
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await _reconciliation("reconciliation_pg", ([], [_discrepancy(_DRIFT, _CRIT)]))
+            await settle()
+            paged = list(telegram.messages)
+            await _reconciliation("reconciliation_pg", ([], []), error="KeyCRM fetch failed")
+            await settle()
+            events = await ledger.events()
+            series = await ledger.series()
 
-        scheduler = BackgroundScheduler()
-        with patch("core.alerting.resolve_group", new=AsyncMock()) as rg:
-            await scheduler._resolve_dq_layer("integrity", [], "boom")
-        rg.assert_not_awaited()
+        assert sorted(int(p["chat_id"]) for p in paged) == sorted(ADMINS)
+        assert not any("recon_pg:status_drift" in p["text"]
+                       for p in telegram.messages[len(paged):])
+        assert events == [("recon_pg:status_drift", "fired", len(ADMINS))]
+        assert series == [("recon_pg:status_drift", "firing", 1)]
+        assert delivered_conditions() == {"recon_pg:status_drift": "dq:reconciliation_pg"}
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_warn_downgrade_clears_the_page_condition(self):
-        """CRITICAL → WARN: the page-condition cleared even though the digest
-        still carries the finding — the charter's lane split."""
-        from core.data_quality import IntegrityIssue, Severity
-        from core.scheduler import BackgroundScheduler
+    async def test_a_warn_downgrade_clears_the_page_condition(self, monkeypatch):
+        """CRITICAL → WARN: the page-condition is announced cleared, by its
+        name, to each admin, though the finding stands and the journal (the
+        digest's lane) still carries it — the charter's lane split.
+        Mutation: hold every finding a run still has, whatever its severity."""
+        journal = install_journal(monkeypatch)
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await _mirror_landing("mirror_landing", [_issue("order_versions_stalled", _CRIT)])
+            await settle()
+            paged = len(telegram.messages)
+            await _mirror_landing("mirror_landing", [_issue("order_versions_stalled", _WARN)])
+            await settle()
+            events = [(key, kind) for key, kind, _ in await ledger.events()]
 
-        scheduler = BackgroundScheduler()
-        warn_issue = IntegrityIssue(
-            check_name="mirror_retired_rows", table_name="t",
-            severity=Severity.WARN, count=1, sample_ids=[], description="d",
-        )
-        with patch("core.alerting.resolve_group", new=AsyncMock()) as rg:
-            await scheduler._resolve_dq_layer(
-                "mirror_landing", [warn_issue], None,
-            )
-        assert rg.await_args.kwargs.get("still_firing") == [] or \
-               rg.await_args.args[1:] == ([],)
+        notices = telegram.messages[paged:]
+        assert paged == len(ADMINS)
+        assert sorted(int(p["chat_id"]) for p in notices) == sorted(ADMINS)
+        assert all("order_versions_stalled" in p["text"] for p in notices)
+        assert events == [("order_versions_stalled", "fired"),
+                          ("order_versions_stalled", "resolved")]
+        assert delivered_conditions() == {}
+        assert [(i["check_name"], i["severity"])
+                for i in journal.issues(journal.rows[-1].run_id)] == [
+            ("order_versions_stalled", "WARN")]
 
 
 # ─── Every layer that pages, run with a CRITICAL beside a WARN ──────────────
@@ -384,9 +408,9 @@ async def _mirror_landing(layer, found):
         await BackgroundScheduler()._run_dq_mirror_landing()
 
 
-async def _reconciliation(layer, found):
+async def _reconciliation(layer, found, *, error=None):
     """An arm of the 05:30 job persisting its verdict: `found` is (issues,
-    discrepancies)."""
+    discrepancies), and `error` what made the arm fail, if it did."""
     from core.scheduler import BackgroundScheduler
 
     scheduler = BackgroundScheduler()
@@ -394,7 +418,7 @@ async def _reconciliation(layer, found):
                "reconciliation_ch": scheduler._persist_ch_reconciliation}[layer]
     issues, discrepancies = found
     now = datetime.now(timezone.utc)
-    await persist({"issues": issues, "discrepancies": discrepancies, "error": None},
+    await persist({"issues": issues, "discrepancies": discrepancies, "error": error},
                   started_at=now, as_of=now, window_start=now.date(), window_end=now.date())
 
 

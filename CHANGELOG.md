@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.373
+
+- fix(admin): keep the background status refresh's task, and a cancelled one quiet
+- docs: the test baseline after batches 4 and 5 — 9 398 passed, 62 skipped
+- tests: batch 5, ci-bot-sched — the forecast gate, the bot's readers, the scheduler and the heavy lock tested by what they do
+- tests: batch 5, integration — the catalogue step's test opens its own pool
+- tests: batch 5, chains-reports — behavioural tests for the watermark wiring, GA4 country filter, platform labels, brand table, CSV filters and D9
+- tests: batch 5, captures-goals — captures, goal routes and the bot page checked through the app over Postgres
+- tests: batch 5, recon — the archive, the two Golds and the reconciliation by what they write
+- tests: batch 5, alerts-dq — the real Gate, transports and jobs over Postgres
+
+
 ## 3.0.372
 
 - tests: batch 4, fe-sms — SMS tests check state and keys, not classes, sentences or storage keys

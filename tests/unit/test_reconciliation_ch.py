@@ -15,6 +15,12 @@ import pytest
 
 from core.data_quality import DiscrepancyClass, classify_order_discrepancies
 from core.reconciliation_io import CH_HEADER_FIELDS
+from tests.helpers.recon_clickhouse import (
+    fresh_clickhouse_copies,
+    kept_mirror_state,
+    needs_clickhouse,
+)
+from tests.integration.pg_tab_seed import DSN, derive, needs_postgres, seed, tab_in_postgres
 
 
 def _facts(status=12, source=1, manager=4, buyer=7, total=100.0,
@@ -201,15 +207,54 @@ class TestTheArmGates:
         assert "ConnectionError" in result["error"]
 
 
-class TestExtractorShape:
-    def test_the_sql_carries_window_sources_and_exclusions(self):
-        """Pin the three clauses a rewrite must not drop."""
-        import inspect
+# ─── The extractor against the copy itself ──────────────────────────────────
 
-        from core import reconciliation_io
+UTC = timezone.utc
+EXCLUDED = 17
 
-        src = inspect.getsource(reconciliation_io.clickhouse_orders_in_window)
-        assert "BETWEEN" in src
-        assert "source_id IN" in src
-        assert "NOT IN" in src
-        assert "FROM silver.orders" in src
+
+async def _window_edges(conn, pool):
+    """Bronze in Postgres, Silver derived from it: what the hourly ship sends."""
+    await seed(conn, orders=[
+        # (id, source_id, status_id, grand_total, ordered_at, buyer, manager, promocode)
+        (11, 1, 12, 100.00, datetime(2026, 6, 10, 9, tzinfo=UTC), 900, 4, None),
+        # Opencart: synced and reconciled, though never revenue.
+        (12, 3, 12, 40.00, datetime(2026, 6, 11, 9, tzinfo=UTC), 901, None, None),
+        # A source this system does not sync.
+        (13, 6, 12, 70.00, datetime(2026, 6, 12, 9, tzinfo=UTC), 902, None, None),
+        (14, 1, 12, 20.00, datetime(2026, 5, 20, 9, tzinfo=UTC), 903, None, None),
+        # 1 July in Kyiv, 30 June in UTC — and the other way round.
+        (15, 1, 12, 30.00, datetime(2026, 6, 30, 22, 30, tzinfo=UTC), 904, None, None),
+        (16, 1, 12, 60.00, datetime(2026, 5, 31, 21, 30, tzinfo=UTC), 905, None, None),
+        (EXCLUDED, 1, 12, 90.00, datetime(2026, 6, 15, 9, tzinfo=UTC), 906, None, None),
+    ])
+    await derive(pool)
+
+
+@needs_postgres
+@needs_clickhouse
+@pytest.mark.asyncio
+async def test_the_copy_answers_its_window_its_sources_and_its_exclusions(monkeypatch):
+    """Silver shipped by the real hourly tick, then June asked of the copy
+    with one id excluded: the orders of June by the Kyiv date, on a source
+    this system syncs, less the exclusion — each with its header facts.
+    Mutation: drop the window, the source filter or the exclusion."""
+    from core import ch_silver
+    from core.reconciliation_io import clickhouse_orders_in_window
+
+    async with kept_mirror_state(ch_silver.SILVER_STATE, ch_silver.GOLD_STATE), \
+            tab_in_postgres(DSN, monkeypatch, _window_edges):
+        await fresh_clickhouse_copies()
+        assert "error" not in await ch_silver.ch_silver_sync()
+        got = await clickhouse_orders_in_window(
+            date(2026, 6, 1), date(2026, 6, 30), exclude_ids={EXCLUDED})
+
+    def facts(source, manager, buyer, total, day):
+        return {"status_id": 12, "source_id": source, "manager_id": manager,
+                "buyer_id": buyer, "grand_total": total, "order_date": day}
+
+    assert got == {
+        11: facts(1, 4, 900, 100.0, date(2026, 6, 10)),
+        12: facts(3, None, 901, 40.0, date(2026, 6, 11)),
+        16: facts(1, None, 905, 60.0, date(2026, 6, 1)),
+    }

@@ -1,61 +1,194 @@
-"""Every actor that writes DuckDB orders and then mirrors them holds the
-scheduler's heavy-job lock across both.
+"""Every actor that writes orders holds the scheduler's heavy-job lock while
+it does, so no two of them interleave.
 
-The three scheduled syncs always did. The manual paths did not, and that is
-where a fresher order got overwritten in Postgres by an older snapshot and
-where header-only orders were manufactured: a resync, a status refresh or a
-backfill chunk interleaving with the minute sync. Structural, because the
-defect was structural — which call sites hold the lock.
+The scheduled syncs always did. The manual paths did not, and that is where a
+fresher order got overwritten in Postgres by an older snapshot and where
+header-only orders were manufactured: a resync, a status refresh or a
+backfill chunk interleaving with the minute sync. The levers and the repair
+jobs run here beside a test that holds the lock, as another heavy job would
+(`tests.helpers.ci_bot_sched_heavy_lock`), over the test Postgres with
+KeyCRM faked at its transport; the walk at the end covers the writers
+outside `core/` that nobody thought to name.
 """
-import inspect
+import asyncio
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
-from core import scheduler as scheduler_module
-from web.routes.api import admin
+import pytest
 
+from core import pg_orders_write
+from tests.helpers.alerts_journal_pg import settle
+from tests.helpers.ci_bot_sched_heavy_lock import (
+    admin_in_this_loop, derivation_stand, fresh_scheduler, parked_behind,
+    postgres_by_connection)
+from tests.helpers.orders_sync import (
+    keycrm_serving_orders, order_payload, orders_held, orders_in_postgres)
+from tests.integration.pg_tab_seed import DSN, needs_postgres
 
-def _source(module, name):
-    return inspect.getsource(getattr(module, name))
-
-
-def test_the_manual_resync_holds_the_lock_at_the_route():
-    src = _source(admin, "trigger_resync")
-    assert "_heavy_job_lock" in src
-    # ...and not inside full_sync, which the weekly job calls already holding it.
-    from core.sync_service import SyncService
-
-    assert "_heavy_job_lock" not in inspect.getsource(SyncService.full_sync)
-
-
-def test_the_manual_status_refresh_holds_the_lock():
-    assert "_heavy_job_lock" in _source(admin, "refresh_order_statuses")
+OID = 991_401
 
 
-def test_the_manual_warehouse_refresh_holds_the_lock():
-    """Interleaved with the two-minute job it produced false validation
-    failures and raced its fired/resolved notices. Since step 14's S14-15
-    the route runs the Postgres derivation alone, which takes the lock
-    itself (`_run_pg_derivation`), so the route must not hold it around the
-    call — `asyncio.Lock` is not reentrant."""
-    src = _source(admin, "refresh_warehouse")
-    assert "_derive_postgres_now" in src and "_heavy_job_lock" not in src
-    assert "_run_pg_derivation" in _source(admin, "_derive_postgres_now")
-    derive = inspect.getsource(scheduler_module.BackgroundScheduler._run_pg_derivation)
-    assert "async with self._heavy_job_lock:" in derive
+def _ago(**delta) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(**delta)
 
 
-# `test_the_backfill_route_passes_the_lock` held `POST
-# /api/mirror/backfill/orders` to handing the backfill the lock, until step
-# 14's S14-13 deleted the route with `core.pg_backfill`.
+@needs_postgres
+class TestTheManualLeversWaitForTheLock:
+    """A lever pulled while another heavy job runs asks KeyCRM nothing until
+    the lock is free, then does its work."""
+
+    @pytest.mark.asyncio
+    async def test_a_resync(self, monkeypatch):
+        """Taken at the route and not again inside the full sync, which the
+        weekly job calls already holding it: released, the resync finishes."""
+        created = _ago(hours=3)
+        async with orders_in_postgres(), postgres_by_connection(DSN):
+            keycrm = keycrm_serving_orders(monkeypatch, [order_payload(OID, created=created)])
+            lock = fresh_scheduler(monkeypatch)._heavy_job_lock
+            async with admin_in_this_loop() as admin:
+                await lock.acquire()
+                try:
+                    resync = asyncio.ensure_future(
+                        admin.post("/api/sync/resync", params={"days": 2}))
+                    await parked_behind(lock, resync)
+                    assert keycrm.requests == []
+                finally:
+                    lock.release()
+                response = await asyncio.wait_for(resync, 60)
+            assert response.status_code == 200, response.text
+            assert OID in await orders_held()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("background", [True, False],
+                             ids=["in-the-background", "waited-for"])
+    async def test_a_status_refresh(self, monkeypatch, background):
+        created = _ago(hours=3)
+        async with orders_in_postgres(), postgres_by_connection(DSN):
+            await pg_orders_write.upsert_orders_with_expenses(
+                [order_payload(OID, created=created)])
+            keycrm = keycrm_serving_orders(monkeypatch, [
+                order_payload(OID, created=created, status=19, group=6)])
+            lock = fresh_scheduler(monkeypatch)._heavy_job_lock
+            async with admin_in_this_loop() as admin:
+                await lock.acquire()
+                try:
+                    refresh = asyncio.ensure_future(admin.post(
+                        "/api/sync/refresh-statuses",
+                        params={"days": 2, "background": background}))
+                    await parked_behind(lock, None if background else refresh)
+                    assert keycrm.requests == []
+                    assert (await orders_held())[OID]["status"] == 12
+                finally:
+                    lock.release()
+                response = await asyncio.wait_for(refresh, 60)
+                await settle()   # a refresh started in the background, to its end
+            assert response.status_code == 200, response.text
+            assert (await orders_held())[OID]["status"] == 19
+
+    @pytest.mark.asyncio
+    async def test_a_warehouse_refresh(self, monkeypatch):
+        """Its derivation takes the lock itself, and `asyncio.Lock` is not
+        reentrant: the lever must not hold it around the call. Interleaved
+        with another job it produced false validation failures."""
+        at = datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc)
+        async with derivation_stand(monkeypatch, DSN, [
+                (OID, 1, 1, 120, at, None, None, None)]) as pool:
+            lock = fresh_scheduler(monkeypatch)._heavy_job_lock
+            before = await pool.fetchval("SELECT COALESCE(max(id), 0) FROM meta.derivation_runs")
+
+            async def derived():
+                silver = [r["id"] for r in await pool.fetch("SELECT id FROM silver.orders")]
+                runs = [r["trigger"] for r in await pool.fetch(
+                    "SELECT trigger FROM meta.derivation_runs WHERE id > $1 ORDER BY id",
+                    before)]
+                return silver, runs
+
+            async with admin_in_this_loop() as admin:
+                await lock.acquire()
+                try:
+                    refresh = asyncio.ensure_future(admin.post("/api/warehouse/refresh"))
+                    await parked_behind(lock, refresh)
+                    assert await derived() == ([], [])
+                finally:
+                    lock.release()
+                response = await asyncio.wait_for(refresh, 60)
+            assert response.status_code == 200, response.text
+            assert response.json()["postgres"]["status"] == "success"
+            assert await derived() == ([OID], ["manual"])
 
 
-def test_every_repair_caller_passes_the_lock():
-    src = inspect.getsource(scheduler_module.BackgroundScheduler)
-    calls = [line for line in src.splitlines() if "repair_orders(" in line]
-    assert calls, "no repair_orders callers found"
-    for line in calls:
-        # Either on the same line or the argument list continues below.
-        idx = src.index(line)
-        assert "lock=self._heavy_job_lock" in src[idx: idx + 200], line
+async def _write_beside_the_lock(monkeypatch, run, *, held, served, prepare=None):
+    """Postgres holding `held`, KeyCRM serving `served`; `run(scheduler)`
+    started while the test holds the lock. Returns the orders Postgres held
+    while it waited, and once it was done."""
+    async with orders_in_postgres(), postgres_by_connection(DSN):
+        await pg_orders_write.upsert_orders_with_expenses(held)
+        keycrm_serving_orders(monkeypatch, served)
+        scheduler = fresh_scheduler(monkeypatch)
+        if prepare is not None:
+            await prepare(scheduler)
+        lock = scheduler._heavy_job_lock
+        await lock.acquire()
+        try:
+            job = asyncio.ensure_future(run(scheduler))
+            await parked_behind(lock, job)
+            while_held = await orders_held()
+        finally:
+            lock.release()
+        await asyncio.wait_for(job, 60)
+        return while_held, await orders_held()
+
+
+@needs_postgres
+class TestTheRepairsWriteUnderTheLock:
+    """Each job that re-fetches orders by id writes nothing while another
+    heavy job holds the lock, and writes once it is free. A repair's write
+    beside a sync's put an older payload over a fresher order, and one
+    between a Silver commit and its validation read failed a correct
+    rebuild."""
+
+    @pytest.mark.asyncio
+    async def test_the_half_written_repair(self, monkeypatch):
+        created = _ago(days=2)
+        bare = dict(order_payload(OID, created=created), products=[])
+        while_held, after = await _write_beside_the_lock(
+            monkeypatch, lambda s: s._run_halfwritten_repair(),
+            held=[bare], served=[order_payload(OID, created=created)])
+        assert while_held[OID]["lines"] == []
+        assert after[OID]["lines"] == [OID * 1000]
+
+    @pytest.mark.asyncio
+    async def test_the_gap_backfill(self, monkeypatch):
+        created = _ago(days=400)
+        neighbours = [order_payload(OID - 1, created=created),
+                      order_payload(OID + 1, created=created)]
+        while_held, after = await _write_beside_the_lock(
+            monkeypatch, lambda s: s._run_order_gap_backfill(),
+            held=neighbours, served=neighbours + [order_payload(OID, created=created)])
+        assert OID not in while_held
+        assert OID in after
+
+    @pytest.mark.asyncio
+    async def test_the_reconciliations_repair(self, monkeypatch):
+        """The 05:30 job re-fetches what Postgres lacks. Its verdict's journal
+        is not what is under test here, so it is not written."""
+        created = _ago(days=10)
+        other = order_payload(OID + 5, created=created)
+
+        async def prepare(scheduler):
+            from tests.helpers.access_lists import execute
+
+            await execute("UPDATE meta.mirror_state SET backfilled_at = now()"
+                          " WHERE table_name = 'bronze.orders'")
+            scheduler._persist_postgres_reconciliation = AsyncMock()
+
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        while_held, after = await _write_beside_the_lock(
+            monkeypatch, lambda s: s._run_dq_reconciliation(),
+            held=[other], served=[other, order_payload(OID, created=created)],
+            prepare=prepare)
+        assert OID not in while_held
+        assert OID in after
 
 
 def test_every_writer_of_orders_outside_core_answers_for_the_lock():

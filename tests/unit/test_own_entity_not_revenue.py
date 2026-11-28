@@ -420,11 +420,6 @@ class TestTheFindings:
         assert [i.check_name for i in issues] == ["pg_own_entity_unwatched"]
         assert sorted(held) == ["pg_own_entity_orders", "pg_own_entity_unlisted"]
 
-    def test_the_group_is_read_before_the_recompute(self):
-        from core import pg_warehouse_dq as twins
-
-        assert twins.GROUPS.index("own_entity") < twins.GROUPS.index("silver_row_values")
-
     def test_the_names_are_new_and_registered(self):
         """Rule 15: no image before step 14 treats these as retired, and each
         is in the registry, has its own lever and a human name."""

@@ -149,22 +149,14 @@ class TestTheFiles:
 
     def test_d9s_watched_series_are_registered_conditions(self):
         """D9 reads `app.alert_series` by condition key, so a key nothing can
-        fire any more reads "nothing firing" for ever. `mirror_buckets_disagree`
-        stayed on its list after step 14's S14-12 deleted the comparison that
-        filed it, until S14-20. Mutation: list an unregistered key, or a prefix
-        nothing in the registry carries."""
+        fire any more reads "nothing firing" for ever (`TestD9Alerts` runs
+        the keys it does watch). Mutation: list an unregistered key."""
         from core.alerting import REGISTRY
 
         sql = _uncommented((SQL_DIR / "10_d9_alerts.sql").read_text(encoding="utf-8"))
         block = re.search(r"watched AS \((.*?)\n\),", sql, flags=re.S).group(1)
-        prefix, rest = block.split("a.condition_key IN", 1)
-        named = set(re.findall(r"'([\w:.]+)'", rest))
-        assert "mirror_buckets_disagree" not in named
+        named = set(re.findall(r"'([\w:.]+)'", block.split("a.condition_key IN", 1)[1]))
         assert named and named <= set(REGISTRY), sorted(named - set(REGISTRY))
-        for start in re.findall(r"left\(a\.condition_key, (\d+)\) = '([\w:]+)'", prefix):
-            length, value = int(start[0]), start[1]
-            assert len(value) == length, start
-            assert any(key.startswith(value) for key in REGISTRY), value
 
     def test_d8s_grace_checks_are_the_info_the_utm_completeness_files(self):
         """D8 forgives a UTM verdict still inside its grace (the 07:30 run
@@ -464,6 +456,71 @@ class TestD5DroppedMarks:
                 "DELETE FROM meta.mirror_state WHERE table_name = 'meta.derivation_signal'")
             v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
+
+
+async def alert(conn, key, *, state="firing", fired_ago=timedelta(hours=1), resolved_ago=None):
+    await conn.execute(
+        """
+        INSERT INTO app.alert_series
+               (condition_key, kind, state, first_fired_at, last_fired_at, fired_count, resolved_at)
+        VALUES ($1, 'condition', $2, $3, $3, 2, $4)
+        """, key, state, NOW - fired_ago, None if resolved_ago is None else NOW - resolved_ago)
+
+
+@needs_pg
+class TestD9Alerts:
+    FILE = "10_d9_alerts.sql"
+
+    async def _clear(self, conn):
+        await conn.execute("DELETE FROM app.alert_series")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", [
+        "warehouse_pg:derive_failed",        # anything under the derivation's prefix
+        "warehouse_pg:signal_unreadable",
+        "mirror_stale:silver.orders",
+        "mirror_failing:gold.daily_revenue",
+        "integrity_check_raised",
+        "dq_stale:mirror_landing",
+    ])
+    async def test_a_watched_series_still_firing_fails_and_is_named(self, pool, key):
+        async with scenario(pool) as conn:
+            await self._clear(conn)
+            await alert(conn, key)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL" and key in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", [
+        "mirror_stale:bronze.orders",        # a mirror this check does not watch
+        "dq_stale:reconciliation_pg",
+        "mirror_buckets_disagree",           # retired with the DuckDB comparison
+    ])
+    async def test_a_series_it_does_not_watch_is_not_a_fail(self, pool, key):
+        async with scenario(pool) as conn:
+            await self._clear(conn)
+            await alert(conn, key)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "nothing firing" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_series_resolved_in_the_last_day_passes_but_is_listed(self, pool):
+        async with scenario(pool) as conn:
+            await self._clear(conn)
+            await alert(conn, "mirror_stale:silver.orders", state="resolved",
+                        fired_ago=timedelta(hours=5), resolved_ago=timedelta(hours=2))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "resolved in 24 h" in detail, detail
+        assert "mirror_stale:silver.orders" in detail
+
+    @pytest.mark.asyncio
+    async def test_an_old_resolution_is_not_news(self, pool):
+        async with scenario(pool) as conn:
+            await self._clear(conn)
+            await alert(conn, "integrity_check_raised", state="resolved",
+                        fired_ago=timedelta(days=4), resolved_ago=timedelta(days=3))
+            v, detail = await verdict(conn, self.FILE)
+        assert (v, detail) == ("PASS", "nothing firing, nothing resolved in 24 h")
 
 
 @needs_pg

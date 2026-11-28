@@ -32,6 +32,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.helpers.orders_sync import keycrm_serving_orders, orders_in_postgres
+from tests.integration.pg_tab_seed import needs_postgres
+
 ROOT = Path(__file__).resolve().parents[2]
 UTC = timezone.utc
 DSN = os.getenv("KS_PG_DSN")
@@ -118,27 +121,52 @@ class TestChain6sProductsKeyIsSimplyDue:
         frozen["last_sync_products"] = "2026-10-09T12:43:22+03:00"
         assert await off_store.get_last_sync_time("products") is None
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_and_the_hourly_step_syncs_the_catalogue_at_once(self, monkeypatch):
         """Kills: a step that read an absent key as "not due" — the catalogue
-        would then never sync again until a full sync."""
+        would then never sync again until a full sync. Real store over the test
+        Postgres, KeyCRM faked at its transport."""
+        import asyncpg
+        import httpx
+
+        from core import pg
+        from core.keycrm import KeyCRMClient
+        from core.store import AnalyticsStore
         from core.sync_service import SyncService
 
-        store = MagicMock()
-        store.get_last_sync_time = AsyncMock(return_value=None)
-        store.upsert_products = AsyncMock(return_value=3)
-        store.set_last_sync_time = AsyncMock()
-        client = MagicMock()
+        # The store asks core.pg for its pool, which caches one per process:
+        # an earlier test's pool is bound to a loop that is closed by now.
+        monkeypatch.setattr(pg, "_pool", None)   # its own pool, closed below
 
-        async def pages(*args, **kwargs):
-            yield [{"id": 1}, {"id": 2}, {"id": 3}]
+        def products(request: httpx.Request):
+            if request.url.path.rstrip("/").endswith("/products"):
+                page = int(request.url.params.get("page", "1"))
+                data = [{"id": 990_000 + i, "name": f"Test product {i}", "min_price": 10 * i}
+                        for i in (1, 2, 3)] if page == 1 else []
+                return httpx.Response(200, json={"data": data})
+            return None
 
-        client.paginate = pages
-        monkeypatch.setattr("core.sync_service.events.emit", AsyncMock())
-        stats: dict = {}
-        await SyncService(store)._catalogue_step_postgres(client, stats)
-        store.upsert_products.assert_awaited_once_with([{"id": 1}, {"id": 2}, {"id": 3}])
-        store.set_last_sync_time.assert_awaited_once_with("products")
+        async with orders_in_postgres():
+            conn = await asyncpg.connect(os.environ["KS_PG_DSN"])
+            try:
+                await conn.execute("DELETE FROM meta.chain_watermarks WHERE key = 'last_sync_products'")
+                await conn.execute("DELETE FROM bronze.products WHERE id BETWEEN 990000 AND 990999")
+                keycrm_serving_orders(monkeypatch, [], answer=products)
+                stats: dict = {}
+                await SyncService(AnalyticsStore())._catalogue_step_postgres(
+                    KeyCRMClient(api_key="test"), stats)
+
+                held = await conn.fetch(
+                    "SELECT id FROM bronze.products WHERE id BETWEEN 990000 AND 990999 ORDER BY id")
+                key = await conn.fetchval(
+                    "SELECT value FROM meta.chain_watermarks WHERE key = 'last_sync_products'")
+            finally:
+                await conn.execute("DELETE FROM bronze.products WHERE id BETWEEN 990000 AND 990999")
+                await conn.close()
+                await pg.close_pool()
+        assert [r["id"] for r in held] == [990_001, 990_002, 990_003]
+        assert key is not None
         assert stats["products"] == 3
 
 

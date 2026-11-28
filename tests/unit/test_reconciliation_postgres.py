@@ -17,53 +17,26 @@ would be a poor trade on any job and a very poor one on this one, which spent
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.data_quality import DiscrepancyClass
-from core.reconciliation_io import (
-    postgres_orders_in_window,
-    rollup_from_orders,
-)
+from core.reconciliation_io import rollup_from_orders
 from core.scheduler import BackgroundScheduler
+from tests.helpers.dq_journal_pg import pool  # noqa: F401
+from tests.helpers.orders_sync import (
+    keycrm_serving_orders,
+    order_payload,
+    orders_held,
+    orders_in_postgres,
+)
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 AS_OF = datetime(2026, 8, 24, 3, 0, tzinfo=timezone.utc)
 START, END = date(2026, 5, 26), date(2026, 8, 24)
-
-def _body(fn):
-    """A function's source with its docstring removed.
-
-    These tests read the extractor's SQL, and prose that *explains* an
-    expression contains the same words as the expression.
-
-    Sliced by line number from the AST, not by `source.replace(fn.__doc__, "")`
-    — **that trick is version-dependent and fails silently.** Python 3.13
-    started dedenting `__doc__`, so from 3.13 on the string no longer matches
-    the indented literal in the source, `replace` finds nothing, and the test
-    compares prose it meant to exclude. It passed on 3.12 here and failed on
-    the 3.14.7 production runs, which is the only reason anyone found out."""
-    source = textwrap.dedent(inspect.getsource(fn))
-    node = ast.parse(source).body[0]
-    first = node.body[0] if node.body else None
-    is_doc = (
-        isinstance(first, ast.Expr)
-        and isinstance(getattr(first, "value", None), ast.Constant)
-        and isinstance(first.value.value, str)
-    )
-    if not is_doc:
-        return source
-    lines = source.splitlines(keepends=True)
-    return "".join(lines[: first.lineno - 1] + lines[first.end_lineno :])
-
-
-PG_SQL = _body(postgres_orders_in_window)
-
 
 def _facts(order_id, **over):
     base = {
@@ -73,44 +46,6 @@ def _facts(order_id, **over):
     }
     base.update(over)
     return {order_id: base}
-
-
-class TestTheExtractorAsksTheKeyCrmSidesQuestion:
-    """Drift between KeyCRM's side and the store's is drift the comparison
-    invents. Until step 14's S14-12 these held the Postgres extractor to
-    DuckDB's, expression for expression; DuckDB's went with the job's DuckDB
-    arm, and the fragments both carried are pinned here as literals."""
-
-    def test_the_kyiv_date_is_written_as_keycrms_side_reads_it(self):
-        """The one expression here worth doubting. A day's difference moves
-        orders between months and invents a whole rollup cell. DuckDB's
-        extractor carried it twice too."""
-        assert PG_SQL.count("AT TIME ZONE 'Europe/Kyiv'") == 2
-
-    def test_it_filters_to_the_active_sources(self):
-        assert "o.source_id IN ({sources})" in PG_SQL
-
-    def test_it_honours_the_watermark(self):
-        assert "o.updated_at IS NULL OR o.updated_at <" in PG_SQL
-
-    def test_it_excludes_the_in_flight_ids(self):
-        """KeyCRM's cut is the wider one, so the store's side honours its list."""
-        assert "o.id = ANY($4::bigint[])" in PG_SQL
-
-    def test_line_items_are_aggregated_by_the_one_expression(self):
-        assert "ROUND(SUM(price_sold * quantity), 2) AS amount" in PG_SQL
-
-    def test_it_reads_the_mirror_and_not_the_warehouse(self):
-        assert "bronze.orders" in PG_SQL and "bronze.order_products" in PG_SQL
-        assert "FROM orders o" not in PG_SQL
-
-    def test_it_produces_the_shape_the_rollup_reads(self):
-        """`rollup_from_orders` is the only place a rollup is computed, and it
-        can only be that if every extractor hands it the same dict."""
-        for key in ("status_id", "source_id", "manager_id", "buyer_id",
-                    "grand_total", "order_date", "n_lines", "qty",
-                    "line_amount"):
-            assert f'"{key}":' in PG_SQL
 
 
 class TestItCostsNothing:
@@ -252,14 +187,34 @@ class TestItIsWatchedOnItsOwn:
         assert "reconciliation_pg" in WATCHED_LAYERS
         assert DIGEST_MAX_AGE_HOURS["reconciliation_pg"] == 30
 
-    def test_it_does_not_repair(self):
-        """The persistence of the Postgres verdict repairs nothing: the job
-        re-fetches what Postgres is missing after every arm has persisted
-        (`_run_dq_reconciliation`), so a repair here would run twice."""
-        source = inspect.getsource(
-            BackgroundScheduler._persist_postgres_reconciliation
-        )
-        assert "repair_orders" not in source
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_a_missing_order_is_re_fetched_once(self, pool, monkeypatch):  # noqa: F811
+        """KeyCRM holds an order Postgres lacks. The job persists the Postgres
+        verdict, then re-fetches by id what it found missing — once: the
+        persistence repairs nothing, or the order would be asked for twice.
+        KeyCRM at its transport, the 05:30 job real, Postgres the test
+        database."""
+        missing = 990_861
+        created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=10)
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        async with orders_in_postgres():
+            await pool.execute(
+                "INSERT INTO meta.mirror_state (table_name, backfilled_at)"
+                " VALUES ('bronze.orders', now()) ON CONFLICT (table_name)"
+                " DO UPDATE SET backfilled_at = now()")
+            keycrm = keycrm_serving_orders(monkeypatch, [order_payload(missing, created=created)])
+            result = await BackgroundScheduler()._run_dq_reconciliation()
+            held = await orders_held()
+            found = {r["diff_class"] for r in await pool.fetch(
+                "SELECT d.diff_class FROM app.data_quality_diffs d"
+                " JOIN app.data_quality_runs r USING (run_id)"
+                " WHERE r.layer = 'reconciliation_pg'")}
+
+        assert "MISSING_IN_DK" in found
+        assert keycrm.by_id == [missing]
+        assert result["repair"]["repaired"] == 1
+        assert set(held) == {missing}
 
 
 class TestFloatOrderIsNotADiscrepancy:

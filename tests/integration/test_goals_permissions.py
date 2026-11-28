@@ -7,13 +7,15 @@ but "what does an unexpected segment reach": the answer must be one named row
 and nothing wider, and a value outside the three must reach no write at all.
 
 Despite the verb, it deletes nothing. It recomputes the suggestion and upserts
-that one row, which is why the assertions below are about which row the store
-was asked for rather than about rows disappearing.
+that one row, which is why the test on a real database reads the three goals
+back after it.
 
 The three writers here are `require_admin`, and that gate was unpinned:
 downgrading this one to `require_user` left the whole suite green.
 """
+import os
 import time
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,6 +28,9 @@ from web.routes.auth import (
     session_serializer,
 )
 from core.permissions import ADMIN_USER_IDS
+from tests.integration.pg_tab_seed import needs_postgres
+
+KS_PG_DSN = os.getenv("KS_PG_DSN")
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
@@ -146,13 +151,6 @@ class TestThePathSegmentIsAType:
     def _as_admin(self, client):
         client.cookies.set(SESSION_COOKIE, _make_cookie(ADMIN_ID))
 
-    @pytest.mark.parametrize("period_type", PERIOD_TYPES)
-    def test_a_known_type_resets_that_type_alone(self, client, store, period_type):
-        res = client.delete(f"/api/goals/{period_type}")
-
-        assert res.status_code == 200
-        assert store.reset_calls == [(period_type, "retail")]
-
     @pytest.mark.parametrize(
         "period_type", ["quarterly", "DAILY", "daily%20", "*", "1"],
     )
@@ -164,3 +162,53 @@ class TestThePathSegmentIsAType:
 
         assert res.status_code == 400
         assert _wrote_nothing(store)
+
+
+async def _goal_rows(conn):
+    rows = await conn.fetch(
+        "SELECT period_type, goal_amount, is_custom FROM app.revenue_goals")
+    return {r["period_type"]: (r["goal_amount"], r["is_custom"]) for r in rows}
+
+
+async def _clear_goals(conn):
+    await conn.execute("DELETE FROM app.revenue_goals")
+    await conn.execute("DELETE FROM app.revenue_goal_history")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = $1",
+                       "capture.app.revenue_goal_history")
+    await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+
+
+class TestAResetTouchesOneRow:
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("period_type", PERIOD_TYPES)
+    async def test_a_known_type_resets_that_type_alone(self, period_type):
+        """Three typed goals; resetting one makes that row automatic and
+        leaves the other two as typed."""
+        import asyncpg
+
+        from tests.helpers.app_client import signed_in
+
+        conn = await asyncpg.connect(KS_PG_DSN)
+        await _clear_goals(conn)
+        try:
+            async with signed_in("admin") as admin:
+                for kind in PERIOD_TYPES:
+                    r = await admin.post(f"/api/goals?period_type={kind}&amount=5000")
+                    assert r.status_code == 200, r.text
+                assert all(custom for _, custom in (await _goal_rows(conn)).values())
+
+                res = await admin.delete(f"/api/goals/{period_type}")
+                assert res.status_code == 200, res.text
+
+            rows = await _goal_rows(conn)
+            assert set(rows) == set(PERIOD_TYPES)
+            for kind in PERIOD_TYPES:
+                amount, custom = rows[kind]
+                if kind == period_type:
+                    assert custom is False
+                else:
+                    assert (amount, custom) == (Decimal("5000.00"), True)
+        finally:
+            await _clear_goals(conn)
+            await conn.close()

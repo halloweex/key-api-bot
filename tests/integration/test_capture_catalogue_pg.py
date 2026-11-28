@@ -366,6 +366,23 @@ class TestTheMassDeleteGuard:
         assert (await _stamp(pool))["failures_since_ok"] == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("gone,refused", [(52, False), (53, True)])
+    async def test_a_big_catalogue_is_allowed_one_percent(self, stores, gone, refused):
+        """Over 5 000 live products the limit is 1 %, not the flat 50: with
+        5 200 held, 52 retirements pass and 53 are refused."""
+        store, pool, _env = stores
+        payload = await _seed(store, 5200)
+        keep = 5200 - gone
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.products WHERE id > $1", keep)
+
+        await store.upsert_products(payload[:keep])
+
+        tombs = [v for v in await _versions(pool) if v["is_deleted"]]
+        assert len(tombs) == (0 if refused else gone)
+        assert (await _stamp(pool))["failures_since_ok"] == (1 if refused else 0)
+
+    @pytest.mark.asyncio
     async def test_guard_false_is_the_lever_for_a_confirmed_retirement(self, stores):
         store, pool, _env = stores
         payload = await _seed(store, 120)
@@ -492,6 +509,24 @@ class TestTheCaptureNeverFailsTheWrite:
         assert stamp["last_error"].startswith("UndefinedTableError")
         assert _watch(cap.judge(await cap.read_facts(pool=pool))) == {
             (cap.condition(cap.FAILED, TABLE), "WARN")}
+
+    @pytest.mark.asyncio
+    async def test_the_capture_does_not_hold_the_writes_connection(self, stores):
+        """On a pool of one connection the capture can only run once the write
+        has given its connection back: a capture taking a second one would
+        wait out the acquire timeout and be stamped failed."""
+        store, pool, _env = stores
+        one = await asyncpg.create_pool(DSN, min_size=1, max_size=1)
+        try:
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=one)):
+                assert await asyncio.wait_for(store.upsert_products(PAYLOAD), timeout=10) == 3
+        finally:
+            await one.close()
+
+        assert len(await _versions(pool)) == 3
+        stamp = await _stamp(pool)
+        assert stamp["failures_since_ok"] == 0 and stamp["last_error"] is None
+        assert stamp["last_rows"] == 3
 
     @pytest.mark.asyncio
     async def test_with_the_switch_off_nothing_is_written_or_stamped(self, stores):

@@ -281,15 +281,33 @@ class TestTheRoute:
         assert response.status_code == 400
         assert response.json()["detail"] == "country must be 'ua' or 'all'"
 
-    def test_the_country_reaches_the_service_and_ukraine_is_the_default(self, monkeypatch):
-        asked = []
+    def test_the_country_filter_reaches_ga4_and_ukraine_is_the_default(self, monkeypatch):
+        """Through the route over GA4 at the transport: the answer names the
+        country it counted and every report GA4 was sent carries the filter,
+        or none for all countries."""
+        google = _Google()
+        real = httpx.AsyncClient
 
-        async def get_funnel(start, end, **kwargs):
-            asked.append(kwargs.get("scope"))
-            return {"ok": True}
+        class _OverGoogle(real):
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(google)
+                super().__init__(*args, **kwargs)
 
-        monkeypatch.setattr(svc, "get_funnel", get_funnel)
+        monkeypatch.setattr(httpx, "AsyncClient", _OverGoogle)
         client = _admin_client()
-        assert client.get("/api/traffic/funnel?period=month").status_code == 200
-        assert client.get("/api/traffic/funnel?period=month&country=all").status_code == 200
-        assert asked == ["ua", "all"]
+
+        default = client.get("/api/traffic/funnel?period=month")
+        assert default.status_code == 200
+        assert default.json()["country"] == "ua"
+        assert google.funnels
+        for body in google.funnels:
+            assert body["dimensionFilter"]["filter"]["inListFilter"]["values"] == [
+                "Ukraine", "(not set)"]
+
+        google.funnels.clear()
+        svc._reset_cache()
+        everywhere = client.get("/api/traffic/funnel?period=month&country=all")
+        assert everywhere.status_code == 200
+        assert everywhere.json()["country"] == "all"
+        assert google.funnels
+        assert all("dimensionFilter" not in body for body in google.funnels)
