@@ -20,7 +20,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -31,6 +31,14 @@ from core.reconciliation_io import (
     rollup_from_orders,
 )
 from core.scheduler import BackgroundScheduler
+from tests.helpers.dq_journal_pg import pool  # noqa: F401
+from tests.helpers.orders_sync import (
+    keycrm_serving_orders,
+    order_payload,
+    orders_held,
+    orders_in_postgres,
+)
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 AS_OF = datetime(2026, 8, 24, 3, 0, tzinfo=timezone.utc)
@@ -81,14 +89,8 @@ class TestTheExtractorAsksTheKeyCrmSidesQuestion:
     DuckDB's, expression for expression; DuckDB's went with the job's DuckDB
     arm, and the fragments both carried are pinned here as literals."""
 
-    def test_the_kyiv_date_is_written_as_keycrms_side_reads_it(self):
-        """The one expression here worth doubting. A day's difference moves
-        orders between months and invents a whole rollup cell. DuckDB's
-        extractor carried it twice too."""
-        assert PG_SQL.count("AT TIME ZONE 'Europe/Kyiv'") == 2
-
-    def test_it_filters_to_the_active_sources(self):
-        assert "o.source_id IN ({sources})" in PG_SQL
+    # The Kyiv date and the source filter are asked of a real server in
+    # `tests/integration/test_postgres_orders_in_window.py`.
 
     def test_it_honours_the_watermark(self):
         assert "o.updated_at IS NULL OR o.updated_at <" in PG_SQL
@@ -252,14 +254,34 @@ class TestItIsWatchedOnItsOwn:
         assert "reconciliation_pg" in WATCHED_LAYERS
         assert DIGEST_MAX_AGE_HOURS["reconciliation_pg"] == 30
 
-    def test_it_does_not_repair(self):
-        """The persistence of the Postgres verdict repairs nothing: the job
-        re-fetches what Postgres is missing after every arm has persisted
-        (`_run_dq_reconciliation`), so a repair here would run twice."""
-        source = inspect.getsource(
-            BackgroundScheduler._persist_postgres_reconciliation
-        )
-        assert "repair_orders" not in source
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_a_missing_order_is_re_fetched_once(self, pool, monkeypatch):  # noqa: F811
+        """KeyCRM holds an order Postgres lacks. The job persists the Postgres
+        verdict, then re-fetches by id what it found missing — once: the
+        persistence repairs nothing, or the order would be asked for twice.
+        KeyCRM at its transport, the 05:30 job real, Postgres the test
+        database."""
+        missing = 990_861
+        created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=10)
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        async with orders_in_postgres():
+            await pool.execute(
+                "INSERT INTO meta.mirror_state (table_name, backfilled_at)"
+                " VALUES ('bronze.orders', now()) ON CONFLICT (table_name)"
+                " DO UPDATE SET backfilled_at = now()")
+            keycrm = keycrm_serving_orders(monkeypatch, [order_payload(missing, created=created)])
+            result = await BackgroundScheduler()._run_dq_reconciliation()
+            held = await orders_held()
+            found = {r["diff_class"] for r in await pool.fetch(
+                "SELECT d.diff_class FROM app.data_quality_diffs d"
+                " JOIN app.data_quality_runs r USING (run_id)"
+                " WHERE r.layer = 'reconciliation_pg'")}
+
+        assert "MISSING_IN_DK" in found
+        assert keycrm.by_id == [missing]
+        assert result["repair"]["repaired"] == 1
+        assert set(held) == {missing}
 
 
 class TestFloatOrderIsNotADiscrepancy:

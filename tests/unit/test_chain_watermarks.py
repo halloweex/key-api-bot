@@ -12,9 +12,6 @@ is the point of its signature. The round trip against a real Postgres is in
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -137,18 +134,3 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         assert not {"freshness_offers", "freshness_stocks",
                     "sync_watermarks_unwatched"} & set(_names(handed))
         assert "sync_watermarks_unwatched" in _names(not_handed)
-
-
-class TestTheWiringHasOneHome:
-    def test_the_integrity_job_reads_them_and_passes_them(self):
-        from core.scheduler import BackgroundScheduler
-
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_integrity)))
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
-        called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
-        assert {"sync_keys", "read_values_and_stamps"} <= called
-        scan = [c for c in calls if isinstance(c.func, ast.Name)
-                and c.func.id == "check_internal_integrity"]
-        assert scan and all(
-            any(k.arg == "chain_watermarks" for k in c.keywords) for c in scan)

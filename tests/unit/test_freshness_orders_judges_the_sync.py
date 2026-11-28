@@ -18,15 +18,16 @@ The order step rewrites the row on every tick that lands a batch
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from core import data_quality as dq
 from core.data_quality import Severity, _judge_freshness
+from tests.helpers.alerts_journal_pg import alert_ledger
+from tests.helpers.dq_journal_pg import pool  # noqa: F401 — the journal, emptied
+from tests.integration.pg_tab_seed import needs_postgres
 
 UTC = timezone.utc
 
@@ -152,23 +153,61 @@ class TestOnlyTheSourceClockMoves:
         assert "DuckDB's stamp from before the switch" in page.description
 
 
-class TestTheWiring:
-    def test_the_integrity_job_reads_the_stamps_and_passes_them(self):
-        """One statement for both, so a value and its stamp are one row's.
-        Mutation: read the values alone, or drop `chain_stamps=` — the check
-        goes back to judging KeyCRM's clock."""
-        from core.scheduler import BackgroundScheduler
+@asynccontextmanager
+async def _watermarks(pool, rows):
+    """`meta.chain_watermarks` holding `rows` — `{key: (value, updated_at)}` —
+    for the block, and as it was after it."""
+    keys = list(rows)
+    async with pool.acquire() as conn:
+        before = await conn.fetch(
+            "SELECT key, value, updated_at FROM meta.chain_watermarks "
+            "WHERE key = ANY($1)", keys)
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", keys)
+        await conn.executemany(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3)",
+            [(key, value.isoformat(), stamp) for key, (value, stamp) in rows.items()])
+    try:
+        yield
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key = ANY($1)", keys)
+            await conn.executemany(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, $2, $3)", [tuple(r) for r in before])
 
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_integrity)))
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
-        called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
-        assert "read_values_and_stamps" in called
-        scan = [c for c in calls if isinstance(c.func, ast.Name)
-                and c.func.id == "check_internal_integrity"]
-        assert scan and all(
-            {"chain_watermarks", "chain_stamps"} <= {k.arg for k in c.keywords}
-            for c in scan)
+
+class TestTheWiring:
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unwritten_h, filed", [
+        (0, []), (9, [("CRITICAL", 9)])], ids=["a_quiet_night", "a_stalled_step"])
+    async def test_the_integrity_job_judges_the_order_step_by_its_last_write(
+        self, pool, monkeypatch, unwritten_h, filed,
+    ):
+        """The integrity job over the test Postgres. KeyCRM's newest update in
+        `last_sync_orders` is nine hours old; every other sync wrote five
+        minutes ago. Rewritten a minute ago, the row is a quiet night and the
+        run files no `freshness_orders`; not rewritten for nine hours, the
+        order step stalled, CRITICAL at 9 h. Mutation: read the values alone,
+        or drop `chain_stamps=` from the job's call — the quiet night pages."""
+        from core.scheduler import BackgroundScheduler
+        from core.write_chains import sync_keys
+
+        now = datetime.now(timezone.utc)
+        rows = {key: (now - timedelta(minutes=5), now - timedelta(minutes=5))
+                for key in sync_keys()}
+        rows["last_sync_orders"] = (now - timedelta(hours=9),
+                                    now - timedelta(hours=unwritten_h, minutes=1))
+        async with _watermarks(pool, rows), alert_ledger(monkeypatch):
+            result = await BackgroundScheduler()._run_dq_integrity()
+            async with pool.acquire() as conn:
+                found = await conn.fetch(
+                    "SELECT severity, count FROM app.data_quality_issues "
+                    "WHERE run_id = $1 AND check_name = 'freshness_orders'",
+                    result["run_id"])
+
+        assert result["run_id"] is not None
+        assert [tuple(r) for r in found] == filed
 
     def test_the_scan_judges_the_order_step_by_its_last_write(self):
         """The integrity scan itself, on a quiet night: KeyCRM's newest update

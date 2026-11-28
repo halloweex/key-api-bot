@@ -5,12 +5,17 @@ Covers:
   before it overwrites the working model / feeds revenue_predictions; and
   negative/NaN predictions are never persisted.
 """
-from datetime import date, datetime, timedelta
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 from core.data_quality import _freshness_check, Severity
+from tests.helpers.alerts_journal_pg import alert_ledger, settle
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 from tests.integration.pg_tab_seed import (
     DSN, derive, needs_postgres, seed, tab_in_postgres,
 )
@@ -148,25 +153,111 @@ class TestModelValidationGate:
         assert res["status"] == "success"
         assert svc._model is sentinel_model
 
+
+class _ModelThatAnswers:
+    """In the trained model's place (a LightGBM booster): `revenue`, every day."""
+
+    def __init__(self, revenue: float):
+        self.revenue = revenue
+
+    def predict(self, features):
+        return np.full(len(features), self.revenue)
+
+
+def _forecaster(revenue: float):
+    """A ready service whose model forecasts `revenue` a day."""
+    from core import prediction_service as ps
+
+    svc = ps.PredictionService()
+    svc._model = _ModelThatAnswers(revenue)
+    svc._metrics = {"mae": 1.0, "mape": 30.0, "wape": 27.66}
+    return svc
+
+
+# The history a forecast is judged against: 10 000 to 20 000 a day.
+HISTORY = _valid_training_df()
+PLAUSIBLE = 15_000.0
+
+
+async def _stored_forecast(pool):
+    return [tuple(r) for r in await pool.fetch(
+        "SELECT prediction_date, predicted_revenue, created_at"
+        " FROM app.revenue_predictions WHERE sales_type = 'retail'"
+        " ORDER BY prediction_date")]
+
+
+@asynccontextmanager
+async def _forecast_on_postgres(monkeypatch):
+    """The forecast's tables empty on the test Postgres, the alert ledger
+    beside them and Telegram at the transport. The chain's owner rows and the
+    vintage capture's watermark, which a stored forecast writes, are put back
+    as they were."""
+    from core import chain_latch, pg_forecast_write
+    from core.analytics_captures import state_row
+
+    tables = ("app.revenue_predictions", pg_forecast_write.VINTAGES_TABLE)
+    owners = [chain_latch.owner_key(t) for t in pg_forecast_write.CHAIN_TABLES]
+    capture = state_row(pg_forecast_write.VINTAGES_TABLE)
+    telegram = telegram_at_the_transport(monkeypatch)
+    async with alert_ledger(monkeypatch) as ledger:
+        pool = ledger.pool
+        kept_owners = [r["key"] for r in await pool.fetch(
+            "SELECT key FROM meta.chain_watermarks WHERE key = ANY($1::text[])", owners)]
+        kept_capture = await pool.fetch(
+            "SELECT * FROM meta.mirror_state WHERE table_name = $1", capture)
+        for table in tables:
+            await pool.execute(f"DELETE FROM {table}")
+        try:
+            yield ledger, telegram
+        finally:
+            await settle()
+            for table in tables:
+                await pool.execute(f"DELETE FROM {table}")
+            await pool.execute(
+                "DELETE FROM meta.chain_watermarks WHERE key = ANY($1::text[])"
+                " AND NOT key = ANY($2::text[])", owners, kept_owners)
+            await pool.execute("DELETE FROM meta.mirror_state WHERE table_name = $1", capture)
+            for row in kept_capture:
+                columns = list(row.keys())
+                await pool.execute(
+                    f"INSERT INTO meta.mirror_state ({', '.join(columns)}) VALUES "
+                    f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})",
+                    *row.values())
+
+
+@needs_postgres
+class TestAnImplausibleForecastIsNeverStored:
+    """A11-6: a model past its WAPE gate can still forecast nonsense. That
+    forecast must not replace the one the dashboard shows, and the admins
+    are told; a sane one is stored."""
+
     @pytest.mark.asyncio
-    async def test_negative_predictions_not_stored(self, monkeypatch):
-        from core import prediction_service as ps
-        svc = ps.PredictionService()
-        svc._model = object()  # is_ready
-        svc._metrics = {"wape": 27.66}
+    @pytest.mark.parametrize("revenue", [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(10 * float(HISTORY["revenue"].max()), id="ten-times-the-history"),
+    ])
+    async def test_it_keeps_the_stored_forecast_and_tells_the_admins(
+            self, monkeypatch, revenue):
+        async with _forecast_on_postgres(monkeypatch) as (ledger, telegram):
+            await _forecaster(PLAUSIBLE).predict_month(
+                historical_df=HISTORY, sales_type="retail")
+            before = await _stored_forecast(ledger.pool)
+            assert before and {r[1] for r in before} == {Decimal("15000.00")}
+            assert telegram.messages == []
 
-        fake_store = AsyncMock()
-        async def fake_get_store():
-            return fake_store
-        monkeypatch.setattr("core.store.get_store", fake_get_store)
+            await _forecaster(revenue).predict_month(
+                historical_df=HISTORY, sales_type="retail")
+            await settle()
 
-        hist = _valid_training_df()
-        # predictions contain a negative value → must be rejected.
-        monkeypatch.setattr(ps, "_predict_future",
-                            lambda *a, **k: [{"date": date(2026, 2, 1), "predicted_revenue": -500.0}])
-        monkeypatch.setattr(svc, "_alert_model_rejected", AsyncMock())
+            assert await _stored_forecast(ledger.pool) == before
+            assert telegram.chats() == sorted(ADMINS)
+            assert [(key, kind) for key, kind, _to in await ledger.events()] == [
+                ("prediction:retrain_rejected:retail", "fired")]
 
-        await svc.predict_month(historical_df=hist, sales_type="retail")
-
-        fake_store.store_predictions.assert_not_called()
-        svc._alert_model_rejected.assert_awaited_once()
+    @pytest.mark.asyncio
+    async def test_a_negative_answer_never_lands_as_negative_revenue(self, monkeypatch):
+        async with _forecast_on_postgres(monkeypatch) as (ledger, _telegram):
+            await _forecaster(-500.0).predict_month(
+                historical_df=HISTORY, sales_type="retail")
+            stored = await _stored_forecast(ledger.pool)
+        assert [r for r in stored if r[1] < 0] == []

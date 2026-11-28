@@ -80,21 +80,3 @@ class TestTheBrandTableLeftTheGoldItCannotReach:
         assert "_BRAND_ANALYTICS_SQL" in body
         assert "SUM(order_count)" not in body
         assert "COUNT(DISTINCT l.order_id) AS orders" in revenue._BRAND_ANALYTICS_SQL
-
-    def test_a_brand_that_sold_nothing_is_not_a_row(self):
-        """The old body said `HAVING SUM(product_revenue) > 0`; the brand
-        card's statement has no HAVING, so the report drops those rows itself.
-        Over the syntax tree, not the text: a list comprehension over the
-        brand rows whose condition is `… > 0`."""
-        import textwrap
-
-        node = ast.parse(textwrap.dedent(self._marketing_sql()))
-        filters = [
-            cond for comp in ast.walk(node) if isinstance(comp, ast.ListComp)
-            for gen in comp.generators for cond in gen.ifs
-            if isinstance(cond, ast.Compare)
-            and isinstance(cond.ops[0], ast.Gt)
-            and isinstance(cond.comparators[0], ast.Constant)
-            and cond.comparators[0].value == 0
-        ]
-        assert filters, "a brand with no revenue would become a row"

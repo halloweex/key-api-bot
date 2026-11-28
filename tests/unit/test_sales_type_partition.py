@@ -201,30 +201,32 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
         assert _case_results(sql) == (["it's", "b2b", "internal"], True)
 
     @staticmethod
-    def _results_by_dialect() -> dict[str, tuple[list[str], bool]]:
+    def _results() -> tuple[list[str], bool]:
+        """The CASE as the Postgres derivation renders it — the one engine that
+        derives Silver since step 13."""
         from core.warehouse_sql import silver_sales_type_case
-        from core.sql_dialect import DUCKDB, POSTGRES
+        from core.sql_dialect import POSTGRES
 
-        return {d.name: _case_results(silver_sales_type_case(d)) for d in (DUCKDB, POSTGRES)}
+        return _case_results(silver_sales_type_case(POSTGRES))
 
     def test_every_branch_yields_a_known_type(self):
-        for dialect, (results, has_else) in self._results_by_dialect().items():
-            assert results, f"{dialect}: no THEN/ELSE literal found"
-            assert has_else, (
-                f"{dialect}: without an ELSE an unmatched order gets NULL, "
-                "which is outside the partition too"
-            )
-            unknown = set(results) - set(KNOWN_SALES_TYPES)
-            assert not unknown, (
-                f"{dialect}: the sales_type CASE produces {sorted(unknown)}, which "
-                "is not in KNOWN_SALES_TYPES — its revenue would balance every "
-                "checksum and appear on no page"
-            )
+        results, has_else = self._results()
+        assert results, "no THEN/ELSE literal found"
+        assert has_else, (
+            "without an ELSE an unmatched order gets NULL, which is outside "
+            "the partition too"
+        )
+        unknown = set(results) - set(KNOWN_SALES_TYPES)
+        assert not unknown, (
+            f"the sales_type CASE produces {sorted(unknown)}, which is not in "
+            "KNOWN_SALES_TYPES — its revenue would balance every checksum and "
+            "appear on no page"
+        )
 
     def test_every_known_type_is_produced(self):
         """All four are reachable today; a known type no branch yields is dead."""
-        for dialect, (results, _) in self._results_by_dialect().items():
-            assert set(results) == set(KNOWN_SALES_TYPES), dialect
+        results, _ = self._results()
+        assert set(results) == set(KNOWN_SALES_TYPES)
 
 
 class TestSilverHasOneDefinition:

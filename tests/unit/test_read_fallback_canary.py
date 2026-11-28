@@ -217,48 +217,72 @@ class TestWhatWebPublishes:
         assert [k for k, _ in canary.check_read_refusals(health)] == ["read_refused"]
 
 
+CLICKHOUSE = "http://ks-clickhouse:8123"
+
+
+class _ClickHouse:
+    """ClickHouse over HTTP, as the real client (`core.ch_common.execute`)
+    meets it: every POST to `CLICKHOUSE` is answered `answer` (TabSeparated)
+    and its query kept. Any other host is refused — the test reaches no
+    network."""
+
+    def __init__(self, monkeypatch, answer: str):
+        self.answer = answer
+        self.queries: list = []
+        host = httpx.URL(CLICKHOUSE).host
+
+        async def handle(_transport, request):
+            if request.url.host != host:
+                raise httpx.ConnectError("no network in this test", request=request)
+            self.queries.append((await request.aread()).decode())
+            return httpx.Response(200, text=self.answer)
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+
+
 class TestWhatOffWouldRefuseIsSeen:
     """Until step 14's S14-07 the cohorts' gate was `ch_cohorts.enabled() and
     ch_cohorts.available()`, and web published a route to DuckDB
     (`misconfigured`, `no_engine`, both deleted in S14-16) exactly when `off`
     would refuse it. The cohorts ask ClickHouse whatever `KS_READ_COHORTS`
-    says now, so nothing routes them anywhere: they are refused exactly when
-    there is no ClickHouse to ask, and every such refusal is counted, which
-    the canary pages as `read_refused`. Mutation: let a missing `KS_CH_URL`
-    answer, or refuse a configured one by the switch."""
+    says now (nothing reads it since S14-07), so nothing routes them
+    anywhere: they are refused exactly when there is no ClickHouse to ask,
+    and every such refusal is counted, which the canary pages as
+    `read_refused`."""
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("switch", [None, "duckdb", "clickhouse", " ClickHouse "])
-    @pytest.mark.parametrize("url", [None, "http://ks-clickhouse:8123"])
-    async def test_refused_exactly_without_an_address_and_counted(
-        self, fresh_read_fallback, monkeypatch, tmp_path, switch, url,
+    def test_without_an_address_the_cohorts_are_refused_and_counted(
+        self, admin_client, fresh_read_fallback, monkeypatch,
     ):
-        from core.store import AnalyticsStore
+        """Mutation: let a missing `KS_CH_URL` answer, or refuse without
+        counting it."""
+        monkeypatch.delenv("KS_CH_URL", raising=False)
 
-        if switch is None:
-            monkeypatch.delenv("KS_READ_COHORTS", raising=False)
-        else:
-            monkeypatch.setenv("KS_READ_COHORTS", switch)
-        if url is None:
-            monkeypatch.delenv("KS_CH_URL", raising=False)
-        else:
-            monkeypatch.setenv("KS_CH_URL", url)
+        response = admin_client.get("/api/customers/cohort-ltv")
 
-        async def _answers(sql, **_):
-            return ""
+        assert response.status_code == 503
+        assert response.json()["surface"] == "cohorts"
+        health = admin_client.get("/api/health").json()
+        assert health["read_fallback_mode"]["refused"]["cohorts"]["count"] == 1
+        assert [k for k, _ in canary.check_read_refusals(health)] == ["read_refused"]
 
-        monkeypatch.setattr("core.ch_common.execute", _answers)
-        store = AnalyticsStore()
-        try:
-            rows = await store._analytics_rows(
-                lambda d: f"SELECT 1 FROM {d.silver_orders} o", [], ("int",))
-        except fresh_read_fallback.ReadUnavailable as refused:
-            assert url is None, "a configured ClickHouse was refused"
-            assert refused.surface == "cohorts"
-            assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
-        else:
-            assert url is not None, "no ClickHouse, and the cohorts answered"
-            assert rows == []
+    def test_with_an_address_clickhouse_answers_them(
+        self, admin_client, fresh_read_fallback, monkeypatch,
+    ):
+        """ClickHouse at the transport holds one cohort: ten buyers who spent
+        ₴1 000.50 in their first month. The page gets it, and nothing is
+        refused. Mutation: refuse a configured ClickHouse."""
+        monkeypatch.setenv("KS_CH_URL", CLICKHOUSE)
+        clickhouse = _ClickHouse(monkeypatch, answer="2026-01\t10\t0\t1000.5\t10\n")
+
+        response = admin_client.get("/api/customers/cohort-ltv",
+                                    params={"retention_months": 1})
+
+        assert response.status_code == 200
+        assert response.json()["cohorts"] == [{
+            "month": "2026-01", "customerCount": 10,
+            "cumulativeRevenue": [1000.5, 1000.5], "avgLTV": 100.05}]
+        assert len(clickhouse.queries) == 1
+        assert admin_client.get("/api/health").json()["read_fallback_mode"] == {"refused": {}}
 
 
 # ─── A probe that read nothing clears nothing ──────────────────────────────

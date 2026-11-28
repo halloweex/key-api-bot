@@ -5,12 +5,16 @@ archive contributes only what it alone knows: what stands firing, for how
 long, what was escalated, how many are acknowledged. And it rides a digest
 that news already earned — it never summons one.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.alert_archive import render_digest_tail
+from tests.helpers.alerts_journal_pg import alert_ledger
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
+from tests.helpers.dq_journal_pg import pool  # noqa: F401 — the journal, emptied
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 def _t(hours_ago):
@@ -54,48 +58,75 @@ class TestRender:
         assert "5h" in tail
 
 
+async def _integrity_run(minutes_ago: int, count: int) -> None:
+    """One integrity run `minutes_ago`, its one finding a WARN at `count`."""
+    from core import dq_journal
+    from core.data_quality import IntegrityIssue, Severity
+
+    at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    await dq_journal.journal_run(
+        started_at=at, ended_at=at, as_of=at,
+        window_start=date(2026, 1, 1), window_end=date(2026, 8, 15),
+        layer="integrity", discrepancies=[],
+        issues=[IntegrityIssue(
+            check_name="pg_headline_vs_line_items", table_name="silver_orders",
+            severity=Severity.WARN, count=count, sample_ids=(1, 2),
+            description=f"{count} order(s) have grand_total = 0")])
+
+
+async def _every_other_layer_clean() -> None:
+    """A clean run of every other watched layer half an hour ago: a layer that
+    never ran is news of its own, and would send every digest here."""
+    from core import dq_journal
+    from core.data_quality import WATCHED_LAYERS
+
+    at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    for layer in WATCHED_LAYERS:
+        if layer != "integrity":
+            await dq_journal.journal_run(
+                started_at=at, ended_at=at, as_of=at,
+                window_start=date(2026, 1, 1), window_end=date(2026, 8, 15),
+                layer=layer, issues=[], discrepancies=[])
+
+
 class TestDigestWiring:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_tail_rides_a_digest_and_never_summons_one(
-        self, monkeypatch,
-    ):
-        """build_digest returning None (quiet day) → the tail is not even
-        fetched; returning a message → the tail is appended."""
+    async def test_the_tail_rides_a_digest_and_never_summons_one(self, pool, monkeypatch):
+        """A condition stands firing in the ledger through two digests. The
+        first has no news — the one finding unchanged across both runs since
+        the last digest went out — and nothing is sent, the standing condition
+        notwithstanding. The second has news, the finding grew, and the one
+        message each admin gets carries the tail, naming the condition.
+        Mutation: fetch and send the tail on a quiet day, or leave it off the
+        digest."""
+        from core import dq_journal
         from core.scheduler import BackgroundScheduler
+        from core.telegram_alerts import reset_throttle
 
-        scheduler = BackgroundScheduler()
-        store = AsyncMock()
-        fetched = []
+        telegram = telegram_at_the_transport(monkeypatch)
+        reset_throttle()
+        try:
+            async with alert_ledger(monkeypatch) as ledger:
+                await ledger.firing("disk:WARN", since=timedelta(hours=7))
+                await dq_journal.mark_digest_sent(
+                    (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
+                await _every_other_layer_clean()
+                await _integrity_run(45, 414)
+                await _integrity_run(5, 414)
+                quiet = await BackgroundScheduler()._run_dq_digest()
+                sent_when_quiet = list(telegram.messages)
 
-        async def fake_tail():
-            fetched.append(1)
-            return "── Журнал тревог ──\n⏳ Горит:\n• k — 7h, fired 1×"
+                await _integrity_run(1, 415)
+                news = await BackgroundScheduler()._run_dq_digest()
+        finally:
+            reset_throttle()
 
-        sent = []
-
-        async def fake_send(text, *a, **kw):
-            sent.append(text)
-            return 2
-
-        with patch("core.store.get_store",
-                   AsyncMock(return_value=store)), \
-             patch("core.scheduler.BackgroundScheduler._collect_digest_sections",
-                   new=AsyncMock(return_value=([], None)), create=True), \
-             patch("core.data_quality.build_digest", return_value=None), \
-             patch("core.alert_archive.fetch_digest_tail", new=fake_tail), \
-             patch("bot.main.send_admin_message", new=fake_send):
-            # A quiet day: the scheduler's digest job with build_digest → None
-            # must not fetch the tail. We drive the wiring by calling the job
-            # body via its own method — the store interactions are mocked out
-            # at the levels the job touches.
-            try:
-                await scheduler._run_dq_digest()
-            except Exception:
-                # The job touches more store surface than this test mocks;
-                # what it must NOT have done before failing is fetch or send.
-                pass
-        assert fetched == []
-        assert sent == []
+        assert (quiet["sent"], quiet["quiet"]) == (False, True)
+        assert sent_when_quiet == []
+        assert news["sent"] is True
+        assert telegram.chats() == sorted(ADMINS)
+        assert all("disk:WARN" in p["text"] for p in telegram.messages)
 
     @pytest.mark.asyncio
     async def test_fetch_failure_never_sinks_the_digest(self, monkeypatch):

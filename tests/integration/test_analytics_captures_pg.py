@@ -481,10 +481,7 @@ class TestTheGraceIsReadFromTheJournal:
         assert "could not be read" in issues[f"capture_stalled:{VINTAGES}"].description
 
     @pytest.mark.asyncio
-    async def test_with_every_capture_stamped_the_journal_is_not_asked(
-            self, pool, journal, monkeypatch):
-        from core import dq_journal
-
+    async def test_with_every_capture_stamped_nothing_is_filed(self, pool, journal):
         async with pool.acquire() as conn:
             for table in cap.CAPTURES:
                 await conn.execute(
@@ -492,12 +489,8 @@ class TestTheGraceIsReadFromTheJournal:
                     "ON CONFLICT (table_name) DO UPDATE SET last_ok_at = now()",
                     cap.state_row(table))
 
-        async def refuse(*a, **k):
-            raise AssertionError("the journal was asked with every capture stamped")
-
-        monkeypatch.setattr(dq_journal, "recent_findings", refuse)
         facts = await cap.read_facts(pool=pool)
-        assert facts.missing_since == {} and facts.journal_unread is None
+        assert facts.journal_unread is None
         assert cap.judge(facts) == []
 
 

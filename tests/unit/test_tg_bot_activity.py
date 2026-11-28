@@ -12,6 +12,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_tab_seed import needs_postgres
 from web.services import tg_bot_service as svc
 
 TOKEN = "t" * 64
@@ -149,22 +151,32 @@ async def test_something_that_is_not_json_is_an_error():
 
 # --- the route --------------------------------------------------------------------
 
-def test_the_route_belongs_to_the_tgbot_tab_and_the_marketers_hold_it():
+class TestWhoMayAskForIt:
     """Admin-only on the day it shipped; opened to the marketers the same day.
-    A tab is how that is said, and the two marketing presets carry it."""
-    from core import permissions as perm
-    from tests.routes_helper import route_dependencies
-    from web.main import app
-    from web.routes.auth import require_admin
+    Asked as visitors over the test database: the tab decides, the bot is not
+    reached (no token, so an allowed visitor is told it is not configured)."""
 
-    # Who gets a 403 and who does not is tests/integration/test_tab_permissions.py,
-    # which walks every tab's endpoint; here only that the admin gate is gone.
-    assert require_admin not in set(route_dependencies(app, "/api/tg-bot/activity", "GET"))
-    assert "tgbot" in perm.TAB_FEATURE_KEYS
-    for preset in ("marketer", "marketing"):
-        assert "tgbot" in perm.ACCESS_PRESETS[preset], preset
-    for role in ("viewer", "editor"):
-        assert "tgbot" not in (perm.DEFAULT_TABS[role] or ()), role
+    @pytest.fixture(autouse=True)
+    def _unconfigured(self, monkeypatch):
+        monkeypatch.delenv("KS_TG_BOT_TOKEN")
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("preset", ["marketer", "marketing"])
+    async def test_a_marketing_preset_may_ask(self, preset):
+        from core.permissions import ACCESS_PRESETS
+
+        async with signed_in("editor", tabs=",".join(ACCESS_PRESETS[preset])) as visitor:
+            response = await visitor.get("/api/tg-bot/activity")
+        assert response.status_code == 503
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
+    async def test_a_role_with_no_override_may_not(self, role):
+        async with signed_in(role) as visitor:
+            response = await visitor.get("/api/tg-bot/activity")
+        assert response.status_code == 403
 
 
 def _admin_client() -> TestClient:
